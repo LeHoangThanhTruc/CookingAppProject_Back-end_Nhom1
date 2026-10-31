@@ -1,10 +1,17 @@
+import os
 import sqlite3
+from pathlib import Path
 
 DB_NAME = "database.db"
 
 # Hàm lấy kết nối đến Database
 def get_db():
-    conn = sqlite3.connect(DB_NAME)
+    database_path = os.getenv("DATABASE_PATH", DB_NAME)
+    if database_path != ":memory:":
+        Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
     # Bật tính năng ràng buộc khóa ngoại (Foreign Key) trong SQLite
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
