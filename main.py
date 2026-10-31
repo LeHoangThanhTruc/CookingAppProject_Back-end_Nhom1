@@ -1,9 +1,16 @@
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from database import init_db
 
 # Import các APIRouter từ thư mục features
 from features import auth, main_screen, user_profile
+
+load_dotenv()
 
 app = FastAPI(
     title="Cooking App API",
@@ -22,6 +29,10 @@ app.add_middleware(
 
 # Tự động tạo bảng database nếu chưa tồn tại khi server khởi động
 init_db()
+
+upload_directory = Path(os.getenv("UPLOAD_DIR", "uploads")).expanduser().resolve()
+upload_directory.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(upload_directory)), name="uploads")
 
 # Đăng ký các router từ thư mục features vào app
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])

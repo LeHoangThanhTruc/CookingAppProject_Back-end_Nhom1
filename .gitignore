@@ -205,6 +205,10 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Runtime configuration and user uploads
+/uploads/
+*.db-journal
+
 # Ruff stuff:
 .ruff_cache/
 
