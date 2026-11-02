@@ -2,7 +2,7 @@ import sqlite3
 
 DB_NAME = "database.db"
 
-# Hàm lấy kết nối đến Database
+
 def get_db():
     conn = sqlite3.connect(DB_NAME)
     # Bật tính năng ràng buộc khóa ngoại (Foreign Key) trong SQLite
@@ -14,90 +14,92 @@ def init_db():
     conn = get_db()
     cursor = conn.cursor()
     
-    # 1. Bảng Users (Tài khoản & Profile)
+    # 1. Bảng Users
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             email TEXT UNIQUE NOT NULL,
             phone_number TEXT,
-            password_hash TEXT, -- NULLABLE để hỗ trợ đăng nhập OAuth (Google/Facebook)
+            password_hash TEXT,
             full_name TEXT,
             avatar_url TEXT,
-            bio TEXT,
-            auth_provider TEXT DEFAULT 'LOCAL', -- LOCAL, GOOGLE, FACEBOOK
-            provider_id TEXT,
+            bio TEXT, --Tiếu sử cá nhân
+            auth_provider TEXT DEFAULT 'LOCAL', --LOCAL, GOOGLE, FACEBOOK
+            provider_id TEXT, --ID định danh từ Google/Facebook
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_login_at TIMESTAMP DEFAULT NULL, -- Thời gian đăng nhập gần nhất
-            last_logout_at TIMESTAMP DEFAULT NULL-- Thời gian đăng xuất gần nhất
+            last_login_at TIMESTAMP DEFAULT NULL,
+            last_logout_at TIMESTAMP DEFAULT NULL
         )
     ''')
 
-    # 2. Bảng Friendships (Mối quan hệ bạn bè)
+    # 2. Bảng Friendships
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS friendships (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             friend_id INTEGER NOT NULL,
-            status TEXT DEFAULT 'PENDING', -- PENDING, ACCEPTED, BLOCKED
+            status TEXT DEFAULT 'PENDING',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (friend_id) REFERENCES users(id) ON DELETE CASCADE
         )
     ''')
-
-    # 3. Bảng Posts (Bài viết chung)
+ 
+    # 3. Bảng Posts (lưu thông tin của tất cả các bài đăng trên feed hoặc trang cá nhân)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            post_type TEXT NOT NULL, -- REGULAR (Thường) hoặc RECIPE (Công thức)
+            id INTEGER PRIMARY KEY AUTOINCREMENT, -- Mã bài viết
+            user_id INTEGER NOT NULL, --id người đăng
+            post_type TEXT NOT NULL, -- REGULAR, RECIPE, hoặc SHARED
             caption TEXT,
             privacy TEXT DEFAULT 'PUBLIC', -- PUBLIC, FRIENDS, ONLY_ME
+            original_post_id INTEGER DEFAULT NULL, -- ID bài viết gốc nếu là bài share lại
             like_count INTEGER DEFAULT 0,
             comment_count INTEGER DEFAULT 0,
             share_count INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, --Khi một tài khoản trong bảng users bị xóa (VD: User xóa tài khoản), toàn bộ bài viết (posts) của người đó sẽ tự động bị xóa theo
+            FOREIGN KEY (original_post_id) REFERENCES posts(id) ON DELETE CASCADE --Nếu chủ bài viết gốc xóa bài viết gốc, thì tất cả các bài viết chia sẻ lại (SHARED) liên kết tới nó cũng sẽ tự động bị xóa khỏi hệ thống.
         )
     ''')
-
-    # 4. Bảng Post_Media (Hình ảnh/Video cho bài viết thông thường)
+    
+    # 4. Bảng Post_Media (Quản lý Ảnh/Video bài đăng thường) 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS post_media (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, -- id của từng ảnh/video trong bài viết
+            post_id INTEGER NOT NULL, -- Mã bài viết
             media_url TEXT NOT NULL,
-            media_type TEXT NOT NULL, -- IMAGE hoặc VIDEO
+            media_type TEXT NOT NULL, -- Loại phương tiện: IMAGE, VIDEO,EXCEL,..
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')
 
-    # 5. Bảng Recipes (Chi tiết bài viết công thức)
+    # 5. Bảng Recipes
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recipes (
-            post_id INTEGER PRIMARY KEY,
-            recipe_title TEXT NOT NULL,
-            cover_image_url TEXT NOT NULL,
-            servings INTEGER,
-            cooking_time INTEGER, -- Tính theo phút
+            post_id INTEGER PRIMARY KEY, --liên kết với bảng posts
+            recipe_title TEXT NOT NULL, --tên món ăn
+            cover_image_url TEXT NOT NULL, --ảnh bìa món ăn
+            servings INTEGER, --khẩu phần ăn (cho bao nhiêu người)
+            cooking_time INTEGER, --thời gian nấu (tính bằng phút)
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')
 
-    # 6. Bảng Recipe_Ingredients (Nguyên liệu)
+    # 6. Bảng Recipe_Ingredients (cụ thể từng mục nguyên liệu của công thức nấu ăn)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recipe_ingredients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER NOT NULL,
-            ingredient_name TEXT NOT NULL,
-            amount REAL NOT NULL,
-            unit TEXT NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, --ID nguyên liệu
+            post_id INTEGER NOT NULL, --thuộc công thức nào 
+            ingredient_name TEXT NOT NULL, --tên nguyên liệu
+            amount REAL NOT NULL, --số lượng nguyên liệu
+            unit TEXT NOT NULL, --đơn vị đo lường (gram, kg, ml, lít, muỗng, cốc,...)
             FOREIGN KEY (post_id) REFERENCES recipes(post_id) ON DELETE CASCADE
         )
     ''')
 
-    # 7. Bảng Recipe_Steps (Các bước thực hiện)
+    # 7. Bảng Recipe_Steps
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recipe_steps (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,19 +107,21 @@ def init_db():
             step_number INTEGER NOT NULL,
             instruction TEXT NOT NULL,
             media_url TEXT,
-            media_type TEXT, -- IMAGE, VIDEO, hoặc BOTH
+            media_type TEXT DEFAULT 'IMAGE', -- IMAGE hoặc VIDEO
             FOREIGN KEY (post_id) REFERENCES recipes(post_id) ON DELETE CASCADE
         )
     ''')
 
-    # 8. Bảng Comments (Bình luận)
+    # 8. Bảng Comments (Lưu nội dung bình luận của người dùng dưới các bài viết)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            parent_id INTEGER, -- Chứa ID cmt gốc nếu là reply, NULL nếu là cmt cha
-            content TEXT NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, --id bình luận
+            post_id INTEGER NOT NULL, --bình luận ở bài viết nào
+            user_id INTEGER NOT NULL, --id của người viết bình luận
+            parent_id INTEGER, --NULL nếu là cmt gốc, có ID nếu là trả lời cmt khác
+            content TEXT NOT NULL, -- Có thể để NULL nếu user chỉ comment mỗi ảnh
+            media_url TEXT, -- Link file/ảnh/video đăng trong comment (nếu có)
+            media_type TEXT, -- IMAGE, VIDEO, FILE (nếu có)
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -125,7 +129,7 @@ def init_db():
         )
     ''')
 
-    # 9. Bảng Likes (Lượt thích)
+    # 9. Bảng Likes (lưu vết chính xác ai đã thả tim bài viết nào vào thời điểm nào)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS likes (
             user_id INTEGER NOT NULL,
@@ -136,6 +140,23 @@ def init_db():
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')
+    # 10. Bảng Messages (chức năng share bài viết cho bạn bè kèm tin nhắn)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, -- id lần share đó
+            sender_id INTEGER NOT NULL, --id người gửi
+            receiver_id INTEGER NOT NULL, --id người nhận
+            message_text TEXT,--tin nhắn kèm theo
+            shared_post_id INTEGER, --id bài viết được share
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (shared_post_id) REFERENCES posts(id) ON DELETE CASCADE
+        )
+    ''')
+    # Tạo Indexes tối ưu tốc độ truy vấn Newsfeed
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);")
 
     conn.commit()
     conn.close()

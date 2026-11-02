@@ -4,7 +4,7 @@ from database import init_db
 
 # Import các APIRouter từ thư mục features
 from features import auth, main_screen, user_profile
-
+# Lệnh bật server Python : uvicorn main:app --reload
 app = FastAPI(
     title="Cooking App API",
     description="API cho ứng dụng nấu ăn kết hợp mạng xã hội",
