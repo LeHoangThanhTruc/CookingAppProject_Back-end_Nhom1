@@ -10,8 +10,6 @@ from database import init_db
 # Import các APIRouter từ thư mục features
 from features import auth, main_screen, user_profile
 
-load_dotenv()
-
 app = FastAPI(
     title="Cooking App API",
     description="API cho ứng dụng nấu ăn kết hợp mạng xã hội",
