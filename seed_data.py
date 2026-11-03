@@ -107,7 +107,7 @@ def seed_database():
 
     conn.commit()
     conn.close()
-    print("✅ Đã bơm dữ liệu test đa dạng (PUBLIC, FRIENDS, ONLY_ME) thành công vào database.db!")
+    print("Đã bơm dữ liệu test đa dạng (PUBLIC, FRIENDS, ONLY_ME) thành công vào database.db!")
 
 if __name__ == "__main__":
     seed_database()

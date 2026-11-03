@@ -78,6 +78,8 @@ def init_db():
             post_id INTEGER NOT NULL, -- Mã bài viết
             media_url TEXT NOT NULL,
             media_type TEXT NOT NULL, -- Loại phương tiện: IMAGE, VIDEO,EXCEL,..
+            like_count INTEGER DEFAULT 0,    
+            comment_count INTEGER DEFAULT 0,
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')
@@ -161,9 +163,35 @@ def init_db():
             FOREIGN KEY (shared_post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')
+    # 11. Bảng Post_Media_Likes (Thả tim riêng cho từng ảnh/video)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_media_likes (
+            user_id INTEGER NOT NULL,
+            media_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, media_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (media_id) REFERENCES post_media(id) ON DELETE CASCADE
+        )
+    ''')
+
+    # 12. Bảng Post_Media_Comments (Bình luận riêng cho từng ảnh/video)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_media_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (media_id) REFERENCES post_media(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ''')
     # Tạo Indexes tối ưu tốc độ truy vấn Newsfeed
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_media_comments_media_id ON post_media_comments(media_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_media_likes_media_id ON post_media_likes(media_id);")
 
     conn.commit()
     conn.close()
