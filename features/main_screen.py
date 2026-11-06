@@ -3,8 +3,10 @@ from database import get_db
 from services.cloud_storage import upload_file_to_cloud
 from pydantic import BaseModel
 from typing import Optional, List
+from datetime import datetime, timezone, timedelta
 import mimetypes
 import os
+import sqlite3
 
 router = APIRouter()
 
@@ -18,7 +20,23 @@ class ShareToMessageRequest(BaseModel):
     sender_id: int
     receiver_ids: List[int]
     message_text: Optional[str] = ""
+class CommentCreateRequest(BaseModel):
+    user_id: int
+    content: Optional[str] = ""
+    parent_id: Optional[int] = None
+    media_url: Optional[str] = None
+    media_type: Optional[str] = None
 
+class ReactionRequest(BaseModel):
+    user_id: int
+    reaction_type: str # "LIKE" hoặc "DISLIKE"
+class CommentEditRequest(BaseModel):
+    user_id: int
+    content: str
+
+def get_vietnam_time():
+    vn_tz = timezone(timedelta(hours=7))
+    return datetime.now(vn_tz).strftime("%Y-%m-%d %H:%M:%S")
 # --- Helper nhận diện Media ---
 def detect_media_type(file_url_or_path: str) -> str:
     _, ext = os.path.splitext(file_url_or_path.lower())
@@ -65,19 +83,26 @@ async def upload_media(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi upload: {str(e)}")
 
-# --- HÀM CHI TIẾT MEDIA VỚI LƯỢT LIKE/COMMENT RIÊNG ---
 def _get_post_details(cursor, post_id: int, post_type: str, current_user_id: int = 1):
     details = {}
     
     cursor.execute("""
-        SELECT pm.id, pm.media_url, pm.media_type, pm.like_count, pm.comment_count,
-               (SELECT 1 FROM post_media_likes WHERE user_id = ? AND media_id = pm.id) as is_liked
+        SELECT 
+            pm.id, 
+            pm.media_url, 
+            pm.media_type,
+            COALESCE(pm.like_count, 0) as like_count,
+            COALESCE(pm.comment_count, 0) as comment_count,
+            EXISTS(SELECT 1 FROM post_media_likes WHERE media_id = pm.id AND user_id = ?) as is_liked
         FROM post_media pm
         WHERE pm.post_id = ?
+        ORDER BY pm.id ASC
     """, (current_user_id, post_id))
+    
     media_rows = cursor.fetchall()
     
     media_list = []
+    # 🟢 ĐÃ SỬA: m_likes đứng trước m_cmts cho đúng với thứ tự SELECT ở trên
     for m_id, m_url, m_type, m_likes, m_cmts, m_is_liked in media_rows:
         final_type = m_type
         if not final_type or final_type.strip() == "":
@@ -91,8 +116,8 @@ def _get_post_details(cursor, post_id: int, post_type: str, current_user_id: int
             "media_url": m_url,
             "type": final_type,
             "media_type": final_type,
-            "like_count": m_likes if m_likes else 0,
-            "comment_count": m_cmts if m_cmts else 0,
+            "like_count": m_likes,
+            "comment_count": m_cmts,
             "is_liked": True if m_is_liked else False
         })
     details["media_list"] = media_list
@@ -120,14 +145,19 @@ def _get_post_details(cursor, post_id: int, post_type: str, current_user_id: int
             
     return details
 
-# --- 2. API Newsfeed ---
+
+# --- 3. API Newsfeed ---
 @router.get("/feed")
-def get_main_feed(post_type: str = "ALL", current_user_id: int = 1):
+def get_main_feed(post_type: str = "ALL", current_user_id: int = Query(default=1)):
     conn = get_db()
     cursor = conn.cursor()
     try:
+        # Đếm trực tiếp COUNT(*) lượt like và comment chung từ DB
         query = """
-            SELECT p.id, p.post_type, p.caption, p.like_count, p.comment_count, p.share_count, p.created_at, p.original_post_id, p.privacy,
+            SELECT p.id, p.post_type, p.caption, 
+                   (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as real_like_count,
+                   (SELECT COUNT(*) FROM comments WHERE post_id = p.id AND (media_id IS NULL OR media_id = 0)) as real_comment_count,
+                   p.share_count, p.created_at, p.original_post_id, p.privacy,
                    u.id as user_id, u.full_name, u.avatar_url,
                    (SELECT 1 FROM likes WHERE user_id = ? AND post_id = p.id) as is_liked,
                    COALESCE(orig_p.post_type, p.post_type) as effective_type
@@ -206,7 +236,7 @@ def get_main_feed(post_type: str = "ALL", current_user_id: int = 1):
     finally:
         conn.close()
 
-# --- 3. API Thả tim Bài viết Tổng ---
+# --- 4. API Thả tim Bài viết Tổng ---
 @router.post("/{post_id}/like")
 def toggle_like(post_id: int, user_id: int = Query(1)):
     conn = get_db()
@@ -232,7 +262,7 @@ def toggle_like(post_id: int, user_id: int = Query(1)):
     finally:
         conn.close()
 
-# --- 🟢 4. API BỔ SUNG: Thả tim / Bỏ tim RIÊNG cho từng Media ---
+# --- 5. Thả tim / Bỏ tim RIÊNG cho từng Media ---
 @router.post("/media/{media_id}/like")
 def toggle_media_like(media_id: int, user_id: int = Query(1)):
     conn = get_db()
@@ -276,7 +306,7 @@ def toggle_media_like(media_id: int, user_id: int = Query(1)):
     finally:
         conn.close()
 
-# --- 5. Share APIs ---
+# --- 6. Share APIs ---
 @router.post("/{post_id}/share")
 def share_post_legacy(post_id: int, user_id: int = Query(1), share_type: str = Query("FEED"), caption: str = Query("")):
     if share_type == "FEED":
@@ -319,7 +349,376 @@ def share_post_to_message(post_id: int, payload: ShareToMessageRequest):
         raise HTTPException(status_code=500, detail=f"Lỗi gửi tin nhắn chia sẻ: {str(e)}")
     finally:
         conn.close()
+# 7. API Lấy danh sách bình luận (Đã cấu trúc đệ quy/phân tầng)
+@router.get("/{post_id}/comments")
+def get_post_comments(post_id: int, current_user_id: int = Query(1)):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        # Lấy cột like/dislike tính sẵn + Lọc điều kiện (media_id IS NULL OR media_id = 0)
+        cursor.execute("""
+            SELECT c.id, c.parent_id, c.content, c.media_url, c.media_type, c.created_at, 
+                   u.id as user_id, u.full_name, u.avatar_url,
+                   c.like_count_com_post_chung,
+                   c.dislike_count_com_post_chung,
+                   (SELECT reaction_type FROM comment_reactions WHERE comment_id = c.id AND user_id = ?) as my_reaction
+            FROM comments c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.post_id = ? AND (c.media_id IS NULL OR c.media_id = 0)
+            ORDER BY c.created_at ASC
+        """, (current_user_id, post_id))
+        
+        rows = cursor.fetchall()
+
+        all_cmts = {}
+        root_cmts = []
+
+        for r in rows:
+            c_id, p_id, content, m_url, m_type, created_at, u_id, full_name, avatar_url, likes, dislikes, my_react = r
+            
+            # Tự động nhận diện media_type nếu rỗng
+            final_m_type = m_type
+            if m_url and not final_m_type:
+                final_m_type = detect_media_type_by_mime(m_url)
+
+            cmt_obj = {
+                "comment_id": c_id,
+                "parent_id": p_id,
+                "content": content if content else "",
+                "media_url": m_url,
+                "media_type": final_m_type,
+                "created_at": created_at,
+                "author": {"user_id": u_id, "full_name": full_name, "avatar_url": avatar_url},
+                "like_count": likes if likes else 0,
+                "dislike_count": dislikes if dislikes else 0,
+                "my_reaction": my_react if my_react else "NONE",
+                "replies": []
+            }
+            all_cmts[c_id] = cmt_obj
+
+        for c_id, cmt in all_cmts.items():
+            p_id = cmt["parent_id"]
+            if p_id and p_id in all_cmts:
+                all_cmts[p_id]["replies"].append(cmt)
+            else:
+                root_cmts.append(cmt)
+
+        return {"status": "success", "comments": root_cmts}
+    finally:
+        conn.close()
+
+
+# 8. API Thêm bình luận mới (Gốc hoặc Trả lời của Header bài viết)
+@router.post("/{post_id}/comments")
+def add_comment(post_id: int, req: CommentCreateRequest):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        if not req.content and not req.media_url:
+            raise HTTPException(status_code=400, detail="Bình luận phải có chữ hoặc ảnh đính kèm")
+
+        cursor.execute("""
+            INSERT INTO comments (post_id, user_id, parent_id, content, media_url, media_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (post_id, req.user_id, req.parent_id, req.content, req.media_url, req.media_type, get_vietnam_time()))
+        
+        # 1. CHỈ ĐẾM LẠI COMMENT THUỘC HEADER (LOẠI BỎ COMMENT CỦA MEDIA)
+        cursor.execute("SELECT COUNT(*) FROM comments WHERE post_id = ? AND (media_id IS NULL OR media_id = 0)", (post_id,))
+        real_count = cursor.fetchone()[0]
+
+        # 2. Cập nhật lại cột comment_count chuẩn (chỉ đếm header) trong bảng posts
+        cursor.execute("UPDATE posts SET comment_count = ? WHERE id = ?", (real_count, post_id))
+        conn.commit()
+
+        return {
+            "status": "success", 
+            "message": "Đăng bình luận thành công", 
+            "comment_count": real_count
+        }
+    finally:
+        conn.close()
+
+# 9. API Thả Like / Dislike bình luận
+@router.post("/comments/{comment_id}/react")
+def react_comment(comment_id: int, req: ReactionRequest):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        # 1. Thêm / Cập nhật / Xóa reaction của user trong bảng comment_reactions
+        if req.reaction_type == "NONE":
+            cursor.execute("DELETE FROM comment_reactions WHERE user_id = ? AND comment_id = ?", 
+                           (req.user_id, comment_id))
+        else:
+            cursor.execute("""
+                INSERT INTO comment_reactions (user_id, comment_id, reaction_type)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, comment_id) DO UPDATE SET reaction_type = excluded.reaction_type
+            """, (req.user_id, comment_id, req.reaction_type))
+
+        # 2. Đếm số lượng LIKE và DISLIKE mới nhất của comment này
+        cursor.execute("SELECT COUNT(*) FROM comment_reactions WHERE comment_id = ? AND reaction_type = 'LIKE'", (comment_id,))
+        new_likes = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM comment_reactions WHERE comment_id = ? AND reaction_type = 'DISLIKE'", (comment_id,))
+        new_dislikes = cursor.fetchone()[0]
+
+        # 3. Phân biệt xem comment_id thuộc bảng comments hay post_media_comments để UPDATE
+        cursor.execute("SELECT id FROM comments WHERE id = ?", (comment_id,))
+        if cursor.fetchone():
+            # Cập nhật vào bảng comments bài post chung
+            cursor.execute("""
+                UPDATE comments 
+                SET like_count_com_post_chung = ?, dislike_count_com_post_chung = ? 
+                WHERE id = ?
+            """, (new_likes, new_dislikes, comment_id))
+        else:
+            # Cập nhật vào bảng post_media_comments của media
+            cursor.execute("""
+                UPDATE post_media_comments 
+                SET like_count_com_media = ?, dislike_count_com_media = ? 
+                WHERE id = ?
+            """, (new_likes, new_dislikes, comment_id))
+
+        conn.commit()
+
+        return {
+            "status": "success",
+            "comment_id": comment_id,
+            "my_reaction": req.reaction_type,
+            "like_count": new_likes,
+            "dislike_count": new_dislikes
+        }
+    finally:
+        conn.close()
+# --- 10. API Lấy danh sách bình luận RIÊNG cho từng Media ---
+@router.get("/media/{media_id}/comments")
+def get_media_comments(media_id: int, current_user_id: int = Query(1)):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT c.id, c.parent_id, c.content, c.media_url, c.media_type, c.created_at, 
+                   u.id as user_id, u.full_name, u.avatar_url
+            FROM comments c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.media_id = ?
+            ORDER BY c.created_at ASC
+        """, (media_id,))
+        rows = cursor.fetchall()
+
+        all_cmts = {}
+        root_cmts = []
+
+        for r in rows:
+            c_id, p_id, content, m_url, m_type, created_at, u_id, full_name, avatar_url = r
+            
+            # Lấy thống kê Like / Dislike / Reaction của user hiện tại
+            cursor.execute("SELECT COUNT(*) FROM comment_reactions WHERE comment_id = ? AND reaction_type = 'LIKE'", (c_id,))
+            likes = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM comment_reactions WHERE comment_id = ? AND reaction_type = 'DISLIKE'", (c_id,))
+            dislikes = cursor.fetchone()[0]
+            cursor.execute("SELECT reaction_type FROM comment_reactions WHERE comment_id = ? AND user_id = ?", (c_id, current_user_id))
+            my_react_row = cursor.fetchone()
+            my_react = my_react_row[0] if my_react_row else "NONE"
+
+            cmt_obj = {
+                "comment_id": c_id,
+                "parent_id": p_id,
+                "content": content if content else "",
+                "media_url": m_url,
+                "media_type": m_type,
+                "created_at": created_at,
+                "author": {"user_id": u_id, "full_name": full_name, "avatar_url": avatar_url},
+                "like_count": likes,
+                "dislike_count": dislikes,
+                "my_reaction": my_react,
+                "replies": []
+            }
+            all_cmts[c_id] = cmt_obj
+
+        for c_id, cmt in all_cmts.items():
+            p_id = cmt["parent_id"]
+            if p_id and p_id in all_cmts:
+                all_cmts[p_id]["replies"].append(cmt)
+            else:
+                root_cmts.append(cmt)
+
+        return {"status": "success", "comments": root_cmts}
+    finally:
+        conn.close()
+
+# --- 11. API Thêm bình luận RIÊNG cho từng Media ---
+@router.post("/media/{media_id}/comments")
+def add_media_comment(media_id: int, req: CommentCreateRequest):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        # Lấy post_id từ bảng post_media
+        cursor.execute("SELECT post_id FROM post_media WHERE id = ?", (media_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Không tìm thấy Media")
+        post_id = row[0]
+
+        cursor.execute("""
+            INSERT INTO comments (post_id, media_id, user_id, parent_id, content, media_url, media_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (post_id, media_id, req.user_id, req.parent_id, req.content, req.media_url, req.media_type, get_vietnam_time()))
+        
+        # Cập nhật số lượng comment trong post_media
+        cursor.execute("SELECT COUNT(*) FROM comments WHERE media_id = ?", (media_id,))
+        new_media_cmt_count = cursor.fetchone()[0]
+        cursor.execute("UPDATE post_media SET comment_count = ? WHERE id = ?", (new_media_cmt_count, media_id))
+        conn.commit()
+
+        return {
+            "status": "success", 
+            "message": "Đăng bình luận media thành công", 
+            "comment_count": new_media_cmt_count
+        }
+    finally:
+        conn.close()
+#--12.API Xóa bình luận--       
+# --12. API Xóa bình luận--        
+@router.delete("/comments/{comment_id}")
+def delete_comment(comment_id: int, user_id: int = Query(default=1)):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        # 1. Kiểm tra xem comment_id nằm trong bảng `comments` (Bài post Header hoặc Media)
+        cursor.execute("SELECT post_id, media_id FROM comments WHERE id = ?", (comment_id,))
+        row_post = cursor.fetchone()
+
+        if row_post:
+            post_id, media_id = row_post
+            # Xóa comment chính + comment phản hồi (replies)
+            cursor.execute("DELETE FROM comments WHERE id = ? OR parent_id = ?", (comment_id, comment_id))
+            
+            # Nếu là comment media (media_id > 0)
+            if media_id and media_id > 0:
+                cursor.execute("SELECT COUNT(*) FROM comments WHERE media_id = ?", (media_id,))
+                new_count = cursor.fetchone()[0]
+                cursor.execute("UPDATE post_media SET comment_count = ? WHERE id = ?", (new_count, media_id))
+                
+                conn.commit()
+                return {
+                    "status": "success", 
+                    "message": "Đã xóa bình luận media", 
+                    "comment_count": new_count,
+                    "target": "MEDIA",
+                    "media_id": media_id,
+                    "post_id": post_id
+                }
+            else:
+                # Nếu là comment Header của bài post chung
+                cursor.execute("SELECT COUNT(*) FROM comments WHERE post_id = ? AND (media_id IS NULL OR media_id = 0)", (post_id,))
+                new_count = cursor.fetchone()[0]
+                cursor.execute("UPDATE posts SET comment_count = ? WHERE id = ?", (new_count, post_id))
+
+                conn.commit()
+                return {
+                    "status": "success", 
+                    "message": "Đã xóa bình luận", 
+                    "comment_count": new_count,
+                    "target": "HEADER",
+                    "post_id": post_id
+                }
+
+        # 2. Nếu không có trong `comments`, kiểm tra tiếp trong bảng `post_media_comments`
+        cursor.execute("SELECT media_id FROM post_media_comments WHERE id = ?", (comment_id,))
+        row_media = cursor.fetchone()
+
+        if row_media:
+            media_id = row_media[0]
+            cursor.execute("DELETE FROM post_media_comments WHERE id = ? OR parent_id = ?", (comment_id, comment_id))
+            
+            cursor.execute("SELECT COUNT(*) FROM post_media_comments WHERE media_id = ?", (media_id,))
+            new_count = cursor.fetchone()[0]
+            cursor.execute("UPDATE post_media SET comment_count = ? WHERE id = ?", (new_count, media_id))
+            
+            conn.commit()
+            return {
+                "status": "success", 
+                "message": "Đã xóa bình luận media", 
+                "comment_count": new_count,
+                "target": "MEDIA",
+                "media_id": media_id
+            }
+
+        raise HTTPException(status_code=404, detail="Không tìm thấy bình luận")
+    finally:
+        conn.close()
+#--13.API Chỉnh sửa nội dung bình luận--
+@router.put("/comments/{comment_id}")
+def edit_comment(comment_id: int, req: CommentEditRequest):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        # Thử UPDATE ở bảng `comments` trước
+        cursor.execute("UPDATE comments SET content = ? WHERE id = ?", (req.content, comment_id))
+        
+        # Nếu không có dòng nào được update (do id thuộc comment media), update tiếp bảng `post_media_comments`
+        if cursor.rowcount == 0:
+            cursor.execute("UPDATE post_media_comments SET content = ? WHERE id = ?", (req.content, comment_id))
+
+        conn.commit()
+        return {"status": "success", "message": "Đã cập nhật bình luận"}
+    finally:
+        conn.close()
+# --- API Lấy chi tiết bài viết (Khi đã có prefix /api/posts trong main.py) ---
+@router.get("/{post_id}")
+def get_post_detail_endpoint(post_id: int, current_user_id: int = Query(default=1)):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT p.id, p.post_type, p.caption, 
+                   (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as real_like_count,
+                   -- 🟢 CHỈ ĐẾM BÌNH LUẬN CỦA HEADER (LOẠI BỎ BÌNH LUẬN MEDIA)
+                   (SELECT COUNT(*) FROM comments WHERE post_id = p.id AND (media_id IS NULL OR media_id = 0)) as real_comment_count,
+                   p.share_count, p.created_at, p.privacy,
+                   u.id as user_id, u.full_name, u.avatar_url,
+                   (SELECT 1 FROM likes WHERE user_id = ? AND post_id = p.id) as is_liked
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            WHERE p.id = ?
+        """, (current_user_id, post_id))
+        
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Bài viết không tồn tại")
+        
+        p_id, p_type, caption, like_count, comment_count, share_count, created_at, privacy, u_id, u_name, u_avatar, is_liked = row
+        
+        post_data = {
+            "post_id": p_id,
+            "post_type": p_type,
+            "caption": caption if caption else "",
+            "privacy": privacy if privacy else "PUBLIC",
+            "like_count": like_count if like_count else 0,
+            "comment_count": comment_count if comment_count else 0, # Con số này giờ đây sẽ chuẩn xác = 2!
+            "share_count": share_count if share_count else 0,
+            "created_at": created_at if created_at else "",
+            "is_liked": True if is_liked else False,
+            "author": {
+                "user_id": u_id,
+                "full_name": u_name,
+                "avatar_url": u_avatar
+            }
+        }
+
+        details = _get_post_details(cursor, p_id, p_type, current_user_id)
+        post_data.update(details)
+
+        return {"status": "success", "post": post_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lấy chi tiết bài viết: {str(e)}")
+    finally:
+        conn.close()
 #Thuật toán học bài viết theo sơở thích của người dùng (Dựa vào số lượt like, comment, share, thời gian đăng bài) sẽ được triển khai trong các phiên bản sau.
 #Sự khác biệt giữa Quyền xem (privacy) và thuật toàn phân phối (Feed Algorithm) sẽ được triển khai trong các phiên bản sau.
 # Khi share bài viết cho bạn bè cần kiểm tra người đó có phải bạn bè hay không
-# Chưa làm chức năng comment 
+# Chưa làm khi có nguười comment bài viết do mình tạo thì sẽ gửi thông báo cho người tạo
+# Chưa làm khi có người trả lời comment của mình thì mình sẽ được gửi thông báo.
+# Chưa làm khi có người like, share bài viết do mình tạo thì sẽ gửi thông báo cho người tạo 
+
