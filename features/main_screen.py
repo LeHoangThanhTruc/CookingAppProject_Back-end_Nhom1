@@ -102,7 +102,7 @@ def _get_post_details(cursor, post_id: int, post_type: str, current_user_id: int
     media_rows = cursor.fetchall()
     
     media_list = []
-    # 🟢 ĐÃ SỬA: m_likes đứng trước m_cmts cho đúng với thứ tự SELECT ở trên
+    # m_likes đứng trước m_cmts cho đúng với thứ tự SELECT ở trên
     for m_id, m_url, m_type, m_likes, m_cmts, m_is_liked in media_rows:
         final_type = m_type
         if not final_type or final_type.strip() == "":
@@ -122,26 +122,42 @@ def _get_post_details(cursor, post_id: int, post_type: str, current_user_id: int
         })
     details["media_list"] = media_list
 
-    if post_type == "RECIPE":
+    cursor.execute("""
+        SELECT recipe_title, cover_image_url, servings, servings_to, cooking_time, cooking_time_unit, difficulty
+        FROM recipes WHERE post_id = ?
+    """, (post_id,))
+    r_row = cursor.fetchone()
+    if r_row:
+        r_title, r_cover, r_servings, r_servings_to, r_time, r_unit, r_diff = r_row
+
+        cursor.execute("SELECT ingredient_name, amount, unit FROM recipe_ingredients WHERE post_id = ?", (post_id,))
+        ingredients = [{"name": i[0], "amount": i[1], "unit": i[2]} for i in cursor.fetchall()]
+
         cursor.execute("""
-            SELECT recipe_title, cover_image_url, servings, cooking_time 
-            FROM recipes WHERE post_id = ?
+            SELECT step_number, instruction, media_url, media_type 
+            FROM recipe_steps WHERE post_id = ? ORDER BY step_number ASC
         """, (post_id,))
-        r_row = cursor.fetchone()
-        if r_row:
-            r_title, r_cover, r_servings, r_time = r_row
-            cursor.execute("SELECT ingredient_name, amount, unit FROM recipe_ingredients WHERE post_id = ?", (post_id,))
-            ingredients = [{"name": i[0], "amount": f"{i[1]} {i[2]}".strip()} for i in cursor.fetchall()]
-            
-            cursor.execute("SELECT step_number, instruction FROM recipe_steps WHERE post_id = ? ORDER BY step_number ASC", (post_id,))
-            steps = [{"step": s[0], "instruction": s[1]} for s in cursor.fetchall()]
-            
-            details["recipe_details"] = {
-                "title": r_title,
-                "cover_image_url": r_cover,
-                "ingredients": ingredients,
-                "steps": steps
-            }
+        steps = [{
+            "step_number": s[0], 
+            "instruction": s[1],
+            "media_url": s[2], 
+            "media_type": s[3] if s[3] else "IMAGE"
+        } for s in cursor.fetchall()]
+
+        recipe_obj = {
+            "title": r_title,
+            "cover_image_url": r_cover,
+            "servings": r_servings,
+            "servings_to": r_servings_to if r_servings_to else 0,
+            "cooking_time": r_time,
+            "cooking_time_unit": r_unit if r_unit else "phút",
+            "difficulty": r_diff if r_diff else "Dễ",
+            "ingredients": ingredients,
+            "steps": steps
+        }
+
+        details["recipe"] = recipe_obj
+        details["recipe_details"] = recipe_obj
             
     return details
 
@@ -321,8 +337,12 @@ def share_post_to_feed(post_id: int, payload: ShareToFeedRequest):
     conn = get_db()
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO posts (user_id, post_type, caption, privacy, original_post_id) VALUES (?, 'SHARED', ?, ?, ?)",
-                       (payload.user_id, payload.caption, payload.privacy, post_id))
+        current_time = get_vietnam_time()
+        cursor.execute("""
+            INSERT INTO posts (user_id, post_type, caption, privacy, original_post_id, created_at) 
+            VALUES (?, 'SHARED', ?, ?, ?, ?)
+        """, (payload.user_id, payload.caption, payload.privacy, post_id, current_time))
+        
         new_post_id = cursor.lastrowid
         cursor.execute("UPDATE posts SET share_count = share_count + 1 WHERE id = ?", (post_id,))
         conn.commit()
@@ -578,7 +598,7 @@ def add_media_comment(media_id: int, req: CommentCreateRequest):
         }
     finally:
         conn.close()
-#--12.API Xóa bình luận--       
+     
 # --12. API Xóa bình luận--        
 @router.delete("/comments/{comment_id}")
 def delete_comment(comment_id: int, user_id: int = Query(default=1)):
@@ -674,7 +694,7 @@ def get_post_detail_endpoint(post_id: int, current_user_id: int = Query(default=
         cursor.execute("""
             SELECT p.id, p.post_type, p.caption, 
                    (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as real_like_count,
-                   -- 🟢 CHỈ ĐẾM BÌNH LUẬN CỦA HEADER (LOẠI BỎ BÌNH LUẬN MEDIA)
+                   --CHỈ ĐẾM BÌNH LUẬN CỦA HEADER (LOẠI BỎ BÌNH LUẬN MEDIA)
                    (SELECT COUNT(*) FROM comments WHERE post_id = p.id AND (media_id IS NULL OR media_id = 0)) as real_comment_count,
                    p.share_count, p.created_at, p.privacy,
                    u.id as user_id, u.full_name, u.avatar_url,
@@ -713,6 +733,47 @@ def get_post_detail_endpoint(post_id: int, current_user_id: int = Query(default=
         return {"status": "success", "post": post_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi lấy chi tiết bài viết: {str(e)}")
+    finally:
+        conn.close()
+
+# API Lấy danh sách bạn bè đã kết bạn (status = 'ACCEPTED')
+@router.get("/users/{user_id}/friends")
+def get_user_friends(user_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT u.id, u.full_name, u.avatar_url
+            FROM users u
+            WHERE u.id IN (
+                SELECT friend_id FROM friendships WHERE user_id = ? AND status = 'ACCEPTED'
+                UNION
+                SELECT user_id FROM friendships WHERE friend_id = ? AND status = 'ACCEPTED'
+            )
+        """, (user_id, user_id))
+        
+        rows = cursor.fetchall()
+        friends = [{"user_id": r[0], "full_name": r[1], "avatar_url": r[2]} for r in rows]
+        return {"status": "success", "friends": friends}
+    finally:
+        conn.close()
+# Thêm endpoint này vào file router chứa các API /api/posts
+@router.get("/users/{user_id}")
+def get_user_profile(user_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id, full_name, avatar_url FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User không tìm thấy")
+        return {
+            "user_id": row[0],
+            "full_name": row[1],
+            "avatar_url": row[2]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
 #Thuật toán học bài viết theo sơở thích của người dùng (Dựa vào số lượt like, comment, share, thời gian đăng bài) sẽ được triển khai trong các phiên bản sau.

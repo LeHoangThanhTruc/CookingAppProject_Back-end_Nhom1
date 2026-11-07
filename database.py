@@ -87,11 +87,14 @@ def init_db():
     # 5. Bảng Recipes
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recipes (
-            post_id INTEGER PRIMARY KEY, --liên kết với bảng posts
-            recipe_title TEXT NOT NULL, --tên món ăn
-            cover_image_url TEXT NOT NULL, --ảnh bìa món ăn
-            servings INTEGER, --khẩu phần ăn (cho bao nhiêu người)
-            cooking_time INTEGER, --thời gian nấu (tính bằng phút)
+            post_id INTEGER PRIMARY KEY, -- Liên kết với bảng posts
+            recipe_title TEXT NOT NULL, -- Tên món ăn
+            cover_image_url TEXT NOT NULL, -- Ảnh bìa món ăn
+            servings INTEGER, -- Khẩu phần ăn (từ bao nhiêu người)
+            servings_to INTEGER DEFAULT 0, -- Khẩu phần ăn tối đa (ví dụ: 2-4 người)
+            cooking_time INTEGER, -- Thời gian nấu
+            cooking_time_unit TEXT DEFAULT 'phút', -- Đơn vị thời gian: phút, giờ,...
+            difficulty TEXT DEFAULT 'Dễ', -- Độ khó: Dễ, Trung bình, Khó
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')

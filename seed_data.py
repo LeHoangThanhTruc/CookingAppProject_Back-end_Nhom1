@@ -9,7 +9,8 @@ def seed_database():
     cursor = conn.cursor()
 
     print("Đang dọn dẹp dữ liệu cũ...")
-    cursor.execute("DELETE FROM messages;")             
+    cursor.execute("DELETE FROM friendships;")  # Dọn dẹp bảng bạn bè
+    cursor.execute("DELETE FROM messages;")                      
     cursor.execute("DELETE FROM likes;")
     cursor.execute("DELETE FROM comments;")
     cursor.execute("DELETE FROM recipe_steps;")
@@ -32,7 +33,20 @@ def seed_database():
         VALUES (?, ?, ?, ?, ?)
     """, users)
 
-    print("2. Đang thêm Bài viết thường (REGULAR) với Privacy đa dạng...")
+    print("2. Đang thêm Bạn bè (Friendships) cho User 1...")
+    # Dữ liệu mối quan hệ bạn bè ACCEPTED
+    friendships = [
+        (1, 2, 'ACCEPTED'),  # User 1 là bạn của Gordon Ramsay (User 2)
+        (1, 3, 'ACCEPTED'),  # User 1 là bạn của Hoa Bếp Việt (User 3)
+        (1, 4, 'ACCEPTED'),  # User 1 là bạn của Lan Foodie (User 4)
+        (1, 5, 'ACCEPTED')   # User 1 là bạn của Minh MasterChef (User 5)
+    ]
+    cursor.executemany("""
+        INSERT INTO friendships (user_id, friend_id, status)
+        VALUES (?, ?, ?)
+    """, friendships)
+
+    print("3. Đang thêm Bài viết thường (REGULAR) với Privacy đa dạng...")
     # Bài 1: REGULAR - 1 ảnh - PUBLIC (Công khai)
     cursor.execute("""
         INSERT INTO posts (id, user_id, post_type, caption, privacy, like_count, comment_count, share_count, created_at) 
@@ -47,7 +61,7 @@ def seed_database():
     """)
     cursor.execute("INSERT INTO post_media (post_id, media_url, media_type) VALUES (2, 'https://pub-52fbec2f048b4573862992791c0b7a23.r2.dev/DatabaseCookingApp.xlsx.mp4', 'VIDEO');")
 
-    # Bài 3: REGULAR - Nhiều ảnh (5 ảnh để test Grid overlay +2) - ONLY_ME (Chỉ mình tôi)
+    # Bài 3: REGULAR - Nhiều ảnh - ONLY_ME (Chỉ mình tôi)
     cursor.execute("""
         INSERT INTO posts (id, user_id, post_type, caption, privacy, like_count, comment_count, share_count, created_at) 
         VALUES (3, 5, 'REGULAR', 'Nhật ký chuẩn bị nguyên liệu cho nhà hàng cuối tuần!', 'ONLY_ME', 5, 0, 0, '2026-10-30 19:00:00');
@@ -60,54 +74,90 @@ def seed_database():
         (3, 'https://picsum.photos/id/1020/600/400', 'IMAGE')
     ])
 
-    print("3. Đang thêm Bài viết công thức (RECIPE) - PUBLIC...")
-    # Bài 4: RECIPE - PUBLIC
+    print("4. Đang thêm Bài viết công thức (RECIPE) - PUBLIC...")
+    # Bài 4: RECIPE - Phở Bò
     cursor.execute("""
         INSERT INTO posts (id, user_id, post_type, caption, privacy, like_count, comment_count, share_count, created_at) 
         VALUES (4, 2, 'RECIPE', 'Bí quyết nấu Phở Bò truyền thống chuẩn vị Hà Nội', 'PUBLIC', 128, 24, 12, '2026-10-27 10:00:00');
     """)
-    cursor.execute("INSERT INTO recipes (post_id, recipe_title, cover_image_url, servings, cooking_time) VALUES (4, 'Phở Bò Gia Truyền', 'https://picsum.photos/id/292/600/400', 4, 90);")
+
+    cursor.execute("""
+        INSERT INTO recipes (post_id, recipe_title, cover_image_url, servings, servings_to, cooking_time, cooking_time_unit, difficulty) 
+        VALUES (4, 'Phở Bò Gia Truyền', 'https://picsum.photos/id/292/600/400', 4, 6, 90, 'phút', 'Trung bình');
+    """)
     
-    ingredients = [
+    ingredients_4 = [
         (4, 'Thịt bò tươi', 500, 'gram'),
         (4, 'Bánh phở', 1, 'kg'),
         (4, 'Hành tây, hành lá', 200, 'gram'),
         (4, 'Gừng, hoa hồi, thảo quả', 50, 'gram')
     ]
-    cursor.executemany("INSERT INTO recipe_ingredients (post_id, ingredient_name, amount, unit) VALUES (?, ?, ?, ?)", ingredients)
+    cursor.executemany("INSERT INTO recipe_ingredients (post_id, ingredient_name, amount, unit) VALUES (?, ?, ?, ?)", ingredients_4)
     
-    steps = [
+    steps_4 = [
         (4, 1, 'Sơ chế thịt bò và hầm xương lấy nước dùng ngọt thanh.', 'https://picsum.photos/id/493/600/400', 'IMAGE'),
-        (4, 2, 'Xem hướng dẫn chi tiết cách nêm nếm nước dùng chuẩn vị.', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'VIDEO'),
+        (4, 2, 'Xem hướng dẫn chi tiết cách nêm nếm nước dùng chuẩn vị.', 'https://pub-52fbec2f048b4573862992791c0b7a23.r2.dev/DatabaseCookingApp.xlsx.mp4', 'VIDEO'),
         (4, 3, 'Trần bánh phở, xếp thịt bò và chan nước dùng nóng hổi.', 'https://picsum.photos/id/1080/600/400', 'IMAGE')
     ]
-    cursor.executemany("INSERT INTO recipe_steps (post_id, step_number, instruction, media_url, media_type) VALUES (?, ?, ?, ?, ?)", steps)
+    cursor.executemany("INSERT INTO recipe_steps (post_id, step_number, instruction, media_url, media_type) VALUES (?, ?, ?, ?, ?)", steps_4)
 
-    print("4. Đang thêm Bài viết chia sẻ (SHARED) có Privacy riêng...")
-    # Bài 5: SHARED - Share lại Bài 1 (REGULAR) - FRIENDS
+    # Bài 5: Thêm một Bài viết công thức mới thay thế cho bài share (RECIPE - Bánh ngọt)
     cursor.execute("""
-        INSERT INTO posts (id, user_id, post_type, caption, privacy, original_post_id, like_count, comment_count, share_count, created_at) 
-        VALUES (5, 3, 'SHARED', 'Món ăn sáng nhìn ngon quá chef ơi!', 'FRIENDS', 1, 10, 2, 1, '2026-10-31 09:12:00');
+        INSERT INTO posts (id, user_id, post_type, caption, privacy, like_count, comment_count, share_count, created_at) 
+        VALUES (5, 3, 'RECIPE', 'Hướng dẫn làm bánh bông lan trứng muối mềm xốp tại nhà cực đơn giản.', 'PUBLIC', 85, 12, 4, '2026-10-31 09:12:00');
     """)
 
-    # Bài 6: SHARED - Share lại Bài 4 (RECIPE) - PUBLIC
     cursor.execute("""
-        INSERT INTO posts (id, user_id, post_type, caption, privacy, original_post_id, like_count, comment_count, share_count, created_at) 
-        VALUES (6, 1, 'SHARED', 'Công thức phở bò tuyệt vời cho cuối tuần này!', 'PUBLIC', 4, 35, 7, 3, '2026-11-01 11:45:00');
+        INSERT INTO recipes (post_id, recipe_title, cover_image_url, servings, servings_to, cooking_time, cooking_time_unit, difficulty) 
+        VALUES (5, 'Bánh Bông Lan Trứng Muối', 'https://picsum.photos/id/365/600/400', 6, 8, 45, 'phút', 'Dễ');
     """)
 
-    print("5. Đang thêm dữ liệu tương tác mẫu (Likes)...")
+    ingredients_5 = [
+        (5, 'Bột mì số 8', 150, 'gram'),
+        (5, 'Trứng gà', 4, 'quả'),
+        (5, 'Đường cát', 100, 'gram'),
+        (5, 'Trứng muối', 6, 'lòng đỏ')
+    ]
+    cursor.executemany("INSERT INTO recipe_ingredients (post_id, ingredient_name, amount, unit) VALUES (?, ?, ?, ?)", ingredients_5)
+
+    steps_5 = [
+        (5, 1, 'Đánh bông trứng với đường cho đến khi chuyển màu kem mịn.', 'https://picsum.photos/id/365/600/400', 'IMAGE'),
+        (5, 2, 'Trộn đều bột mì vào hỗn hợp trứng và đem nướng trong lò.', 'https://picsum.photos/id/1062/600/400', 'IMAGE')
+    ]
+    cursor.executemany("INSERT INTO recipe_steps (post_id, step_number, instruction, media_url, media_type) VALUES (?, ?, ?, ?, ?)", steps_5)
+
+    # Bài 6: Thêm một Bài viết thường mới thay thế cho bài share (REGULAR - Mẹo vặt)
+    cursor.execute("""
+        INSERT INTO posts (id, user_id, post_type, caption, privacy, like_count, comment_count, share_count, created_at) 
+        VALUES (6, 1, 'REGULAR', 'Mẹo giữ rau xanh tươi lâu trong tủ lạnh cả tuần không bị héo!', 'PUBLIC', 56, 14, 9, '2026-11-01 11:45:00');
+    """)
+    cursor.execute("INSERT INTO post_media (post_id, media_url, media_type) VALUES (6, 'https://picsum.photos/id/429/600/400', 'IMAGE');")
+
+    print("6. Đang thêm Tin nhắn thông thường (Messages)...")
+    # Tin nhắn mẫu không gắn kèm shared_post_id (hoặc để NULL)
+    messages = [
+        (1, 2, 'Chào chef Albert, tuần này anh có dự định món mới nào chưa?'), 
+        (4, 1, 'Cảm ơn công thức phở bò của anh nhé, rất tuyệt vời!')    
+    ]
+    cursor.executemany("""
+        INSERT INTO messages (sender_id, receiver_id, message_text)
+        VALUES (?, ?, ?)
+    """, messages)
+
+    print("7. Đang thêm dữ liệu tương tác mẫu (Likes)...")
     likes = [
         (1, 1), # User 1 like bài 1
         (1, 4), # User 1 like bài 4
         (3, 4), # User 3 like bài 4
-        (4, 2)  # User 4 like bài 2
+        (4, 2), # User 4 like bài 2
+        (2, 5), # Gordon Ramsay like bài 5
+        (5, 6)  # Minh MasterChef like bài 6
     ]
     cursor.executemany("INSERT INTO likes (user_id, post_id) VALUES (?, ?)", likes)
 
     conn.commit()
     conn.close()
-    print("Đã bơm dữ liệu test đa dạng (PUBLIC, FRIENDS, ONLY_ME) thành công vào database.db!")
+    print("Đã bơm dữ liệu test đầy đủ (Users, Friendships, Posts, Messages, Likes - Không có bài Share) vào database.db!")
 
 if __name__ == "__main__":
     seed_database()
