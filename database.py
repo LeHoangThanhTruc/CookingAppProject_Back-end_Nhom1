@@ -78,6 +78,8 @@ def init_db():
             post_id INTEGER NOT NULL, -- Mã bài viết
             media_url TEXT NOT NULL,
             media_type TEXT NOT NULL, -- Loại phương tiện: IMAGE, VIDEO,EXCEL,..
+            like_count INTEGER DEFAULT 0,    
+            comment_count INTEGER DEFAULT 0,
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')
@@ -85,11 +87,14 @@ def init_db():
     # 5. Bảng Recipes
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recipes (
-            post_id INTEGER PRIMARY KEY, --liên kết với bảng posts
-            recipe_title TEXT NOT NULL, --tên món ăn
-            cover_image_url TEXT NOT NULL, --ảnh bìa món ăn
-            servings INTEGER, --khẩu phần ăn (cho bao nhiêu người)
-            cooking_time INTEGER, --thời gian nấu (tính bằng phút)
+            post_id INTEGER PRIMARY KEY, -- Liên kết với bảng posts
+            recipe_title TEXT NOT NULL, -- Tên món ăn
+            cover_image_url TEXT NOT NULL, -- Ảnh bìa món ăn
+            servings INTEGER, -- Khẩu phần ăn (từ bao nhiêu người)
+            servings_to INTEGER DEFAULT 0, -- Khẩu phần ăn tối đa (ví dụ: 2-4 người)
+            cooking_time INTEGER, -- Thời gian nấu
+            cooking_time_unit TEXT DEFAULT 'phút', -- Đơn vị thời gian: phút, giờ,...
+            difficulty TEXT DEFAULT 'Dễ', -- Độ khó: Dễ, Trung bình, Khó
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')
@@ -122,17 +127,19 @@ def init_db():
     # 8. Bảng Comments (Lưu nội dung bình luận của người dùng dưới các bài viết)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, --id bình luận
-            post_id INTEGER NOT NULL, --bình luận ở bài viết nào
-            user_id INTEGER NOT NULL, --id của người viết bình luận
-            parent_id INTEGER, --NULL nếu là cmt gốc, có ID nếu là trả lời cmt khác
-            content TEXT NOT NULL, -- Có thể để NULL nếu user chỉ comment mỗi ảnh
-            media_url TEXT, -- Link file/ảnh/video đăng trong comment (nếu có)
-            media_type TEXT, -- IMAGE, VIDEO, FILE (nếu có)
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            media_id INTEGER DEFAULT 0,
+            user_id INTEGER NOT NULL,
+            parent_id INTEGER DEFAULT NULL,
+            content TEXT,
+            media_url TEXT,
+            media_type TEXT,
+            like_count_com_post_chung INTEGER DEFAULT 0,
+            dislike_count_com_post_chung INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (parent_id) REFERENCES comments(id) ON DELETE CASCADE
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     ''')
 
@@ -161,9 +168,54 @@ def init_db():
             FOREIGN KEY (shared_post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     ''')
+    # 11. Bảng Post_Media_Likes (Thả tim riêng cho từng ảnh/video)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_media_likes (
+            user_id INTEGER NOT NULL,
+            media_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, media_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (media_id) REFERENCES post_media(id) ON DELETE CASCADE
+        )
+    ''')
+
+    # 12. Bảng Post_Media_Comments (Bình luận riêng cho từng ảnh/video)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_media_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            parent_id INTEGER DEFAULT NULL,
+            content TEXT,
+            media_url TEXT,
+            media_type TEXT,
+            like_count_com_media INTEGER DEFAULT 0,
+            dislike_count_com_media INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (media_id) REFERENCES post_media(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ''')
+    # 13. Bảng Comment_Reactions (Quản lý Like / Dislike từng bình luận)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS comment_reactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            comment_id INTEGER NOT NULL,
+            reaction_type TEXT CHECK(reaction_type IN ('LIKE', 'DISLIKE', 'NONE')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, comment_id),
+            FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ''')
     # Tạo Indexes tối ưu tốc độ truy vấn Newsfeed
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_comments_media_id ON comments(media_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_media_likes_media_id ON post_media_likes(media_id);")
 
     conn.commit()
     conn.close()
