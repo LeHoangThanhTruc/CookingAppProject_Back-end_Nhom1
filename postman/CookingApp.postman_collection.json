@@ -1,0 +1,219 @@
+{
+  "info": {
+    "name": "Cooking App API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {"key": "base_url", "value": "http://127.0.0.1:8000"},
+    {"key": "access_token", "value": ""},
+    {"key": "friend_id", "value": "2"},
+    {"key": "recipe_id", "value": "4"},
+    {"key": "schedule_id", "value": ""}
+  ],
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const expected = { 'Health': 200, 'Login': 200, 'My profile': 200, 'Create recipe post': 201, 'Feed contains created recipe': 200, 'Like post': 200, 'Comment post': 200, 'Save recipe': 200, 'Review recipe': 201, 'Create schedule': 201, 'Delete schedule': 204, 'Search recipes': 200, 'Favorite recipe': 200, 'Friends': 200, 'Search users': 200, 'Send message': 201, 'Conversations': 200, 'Notifications': 200, 'Missing token is rejected': 401, 'Invalid recipe is rejected': 422, 'Invalid upload is rejected': 422 };",
+          "pm.test('HTTP status is expected', function () { pm.response.to.have.status(expected[pm.info.requestName]); });"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {"method": "GET", "url": "{{base_url}}/health"}
+    },
+    {
+      "name": "Login",
+      "event": [{
+        "listen": "test",
+        "script": {"exec": [
+          "pm.test('Login returns a token', function () { pm.expect(pm.response.json().access_token).to.be.a('string').and.not.empty; });",
+          "if (pm.response.code === 200) pm.collectionVariables.set('access_token', pm.response.json().access_token);"
+        ]}
+      }],
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\"email\":\"albert@example.com\",\"password\":\"Demo12345\"}"},
+        "url": "{{base_url}}/api/auth/login"
+      }
+    },
+    {
+      "name": "My profile",
+      "request": {
+        "method": "GET",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/profile/me"
+      }
+    },
+    {
+      "name": "Create recipe post",
+      "event": [{
+        "listen": "test",
+        "script": {"exec": [
+          "pm.test('Recipe was created', function () { pm.expect(pm.response.json().id).to.be.a('number'); });",
+          "if (pm.response.code === 201) pm.collectionVariables.set('recipe_id', pm.response.json().id);"
+        ]}
+      }],
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\"title\":\"Món thử từ Postman\",\"caption\":\"Kiểm tra luồng tạo công thức thành bài post\",\"cover_image_url\":\"/uploads/placeholder-recipe.png\",\"servings\":2,\"cooking_time\":20,\"difficulty\":\"Dễ\",\"privacy\":\"PUBLIC\",\"ingredients\":[{\"name\":\"Nguyên liệu thử\",\"amount\":1,\"unit\":\"phần\"}],\"steps\":[{\"step_number\":1,\"instruction\":\"Bước thử từ Postman\"}]}"},
+        "url": "{{base_url}}/api/recipes"
+      }
+    },
+    {
+      "name": "Feed contains created recipe",
+      "event": [{
+        "listen": "test",
+        "script": {"exec": [
+          "pm.test('Created recipe is a feed post', function () { const id = Number(pm.collectionVariables.get('recipe_id')); const post = pm.response.json().data.find(item => item.post_id === id); pm.expect(post).to.exist; pm.expect(post.post_type).to.eql('RECIPE'); pm.expect(post.recipe_details.title).to.eql('Món thử từ Postman'); });"
+        ]}
+      }],
+      "request": {
+        "method": "GET",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/posts/feed"
+      }
+    },
+    {
+      "name": "Search recipes",
+      "request": {"method": "GET", "url": "{{base_url}}/api/recipes?q=Postman"}
+    },
+    {
+      "name": "Like post",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/posts/{{recipe_id}}/like"
+      }
+    },
+    {
+      "name": "Comment post",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\"content\":\"Bình luận từ Postman\"}"},
+        "url": "{{base_url}}/api/posts/{{recipe_id}}/comments"
+      }
+    },
+    {
+      "name": "Save recipe",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/recipes/{{recipe_id}}/save"
+      }
+    },
+    {
+      "name": "Review recipe",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\"rating\":5,\"content\":\"Đánh giá từ Postman\"}"},
+        "url": "{{base_url}}/api/recipes/{{recipe_id}}/reviews"
+      }
+    },
+    {
+      "name": "Create schedule",
+      "event": [{"listen": "test", "script": {"exec": ["if (pm.response.code === 201) pm.collectionVariables.set('schedule_id', pm.response.json().id);"]}}],
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\"recipe_id\":{{recipe_id}},\"scheduled_for\":\"2026-11-11T18:00:00\",\"note\":\"Postman\"}"},
+        "url": "{{base_url}}/api/schedules"
+      }
+    },
+    {
+      "name": "Delete schedule",
+      "request": {
+        "method": "DELETE",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/schedules/{{schedule_id}}"
+      }
+    },
+    {
+      "name": "Favorite recipe",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/recipes/{{recipe_id}}/favorite"
+      }
+    },
+    {
+      "name": "Friends",
+      "request": {
+        "method": "GET",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/social/friends"
+      }
+    },
+    {
+      "name": "Search users",
+      "request": {
+        "method": "GET",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/social/users?q=chef"
+      }
+    },
+    {
+      "name": "Send message",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\"receiver_id\":{{friend_id}},\"text\":\"Xin chào từ Postman\"}"},
+        "url": "{{base_url}}/api/messages"
+      }
+    },
+    {
+      "name": "Notifications",
+      "request": {
+        "method": "GET",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/notifications"
+      }
+    },
+    {
+      "name": "Conversations",
+      "request": {
+        "method": "GET",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "url": "{{base_url}}/api/messages"
+      }
+    },
+    {
+      "name": "Missing token is rejected",
+      "request": {"method": "GET", "url": "{{base_url}}/api/profile/me"}
+    },
+    {
+      "name": "Invalid recipe is rejected",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\"title\":\"\"}"},
+        "url": "{{base_url}}/api/recipes"
+      }
+    },
+    {
+      "name": "Invalid upload is rejected",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", "type": "string"}]},
+        "header": [{"key": "Content-Type", "value": "text/plain"}],
+        "body": {"mode": "raw", "raw": "not-an-image"},
+        "url": "{{base_url}}/api/posts/upload"
+      }
+    }
+  ]
+}

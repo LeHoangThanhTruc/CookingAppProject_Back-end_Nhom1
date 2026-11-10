@@ -271,33 +271,72 @@ async def upload_my_avatar(
     return updated_profile
 
 
-# Các endpoint bên dưới thuộc chức năng trang người khác/social và được giữ nguyên
-# để không mở rộng phạm vi của phần user profile hiện tại.
 @router.get("/{user_id}")
-def get_user_profile(user_id: int):
-    # TODO: Lấy thông tin cá nhân công khai của người dùng khác.
-    pass
+def get_user_profile(user_id: int, current_user_id: int = Depends(get_current_user_id)):
+    connection = get_db()
+    try:
+        row = _fetch_profile(connection, user_id)
+        friend = connection.execute(
+            "SELECT status FROM friendships WHERE ((user_id=? AND friend_id=?) OR (user_id=? AND friend_id=?)) ORDER BY id DESC LIMIT 1",
+            (current_user_id, user_id, user_id, current_user_id),
+        ).fetchone()
+        followers = connection.execute("SELECT COUNT(*) AS total FROM follows WHERE following_id=?", (user_id,)).fetchone()["total"]
+        following = connection.execute("SELECT COUNT(*) AS total FROM follows WHERE follower_id=?", (user_id,)).fetchone()["total"]
+        posts = connection.execute("SELECT COUNT(*) AS total FROM posts WHERE user_id=? AND privacy='PUBLIC'", (user_id,)).fetchone()["total"]
+        return {
+            "id": row["id"], "username": row["username"], "full_name": row["full_name"],
+            "bio": row["bio"], "avatar_url": row["avatar_url"], "friend_status": friend["status"] if friend else None,
+            "followers_count": followers, "following_count": following, "posts_count": posts,
+        }
+    finally:
+        connection.close()
 
 
 @router.put("/update")
-def update_user_profile(data: LegacyUpdateProfileRequest):
-    # TODO: Endpoint cũ, không dùng cho luồng profile đã xác thực.
-    pass
+def update_user_profile(data: LegacyUpdateProfileRequest, current_user_id: int = Depends(get_current_user_id)):
+    if data.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="Không thể cập nhật hồ sơ người khác")
+    request = UpdateMyProfileRequest(full_name=data.full_name, phone_number=data.phone_number, bio=data.bio)
+    return update_my_profile(request, current_user_id)
 
 
 @router.get("/{user_id}/posts")
-def get_user_posts(user_id: int):
-    # TODO: Lấy tất cả bài viết do người dùng này đăng.
-    pass
+def get_user_posts(user_id: int, current_user_id: int = Depends(get_current_user_id)):
+    connection = get_db()
+    try:
+        _fetch_profile(connection, user_id)
+        visibility = "" if user_id == current_user_id else "AND p.privacy='PUBLIC'"
+        rows = connection.execute(
+            f"SELECT p.*, r.recipe_title, r.cover_image_url FROM posts p LEFT JOIN recipes r ON r.post_id=p.id WHERE p.user_id=? {visibility} ORDER BY p.created_at DESC",
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
 
 
 @router.post("/friend-request")
-def send_friend_request(data: FriendRequest):
-    # TODO: Gửi lời mời kết bạn.
-    pass
+def send_friend_request(data: FriendRequest, current_user_id: int = Depends(get_current_user_id)):
+    from features.social import FriendRequestInput, send_friend_request as send_request
+    if data.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="user_id không khớp access token")
+    return send_request(FriendRequestInput(friend_id=data.friend_id), current_user_id)
 
 
 @router.post("/accept-friend")
-def accept_friend_request(data: FriendRequest):
-    # TODO: Chấp nhận kết bạn.
-    pass
+def accept_friend_request(data: FriendRequest, current_user_id: int = Depends(get_current_user_id)):
+    from features.social import accept_friend_request as accept_request
+    if data.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="user_id không khớp access token")
+    connection = get_db()
+    try:
+        row = connection.execute(
+            "SELECT id FROM friendships WHERE user_id=? AND friend_id=? AND status='PENDING'",
+            (data.friend_id, current_user_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Không tìm thấy lời mời kết bạn")
+        request_id = row["id"]
+    finally:
+        connection.close()
+    return accept_request(request_id, current_user_id)

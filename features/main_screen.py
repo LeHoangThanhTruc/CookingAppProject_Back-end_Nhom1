@@ -1,9 +1,13 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
 from database import get_db
-from services.cloud_storage import upload_file_to_cloud
-from pydantic import BaseModel
-from typing import Optional, List
+from security import get_current_user_id
+from pydantic import BaseModel, Field
+from typing import Optional, List, Literal
 from datetime import datetime, timezone, timedelta
+from io import BytesIO
+from pathlib import Path
+from uuid import uuid4
+from PIL import Image, UnidentifiedImageError
 import mimetypes
 import os
 import sqlite3
@@ -12,31 +16,40 @@ router = APIRouter()
 
 # --- Request Models ---
 class ShareToFeedRequest(BaseModel):
-    user_id: int
-    caption: Optional[str] = ""
-    privacy: str = "PUBLIC"
+    caption: Optional[str] = Field(default="", max_length=2000)
+    privacy: Literal["PUBLIC", "FRIENDS", "ONLY_ME"] = "PUBLIC"
 
 class ShareToMessageRequest(BaseModel):
-    sender_id: int
-    receiver_ids: List[int]
-    message_text: Optional[str] = ""
+    receiver_ids: List[int] = Field(min_length=1, max_length=20)
+    message_text: Optional[str] = Field(default="", max_length=2000)
 class CommentCreateRequest(BaseModel):
-    user_id: int
-    content: Optional[str] = ""
+    content: Optional[str] = Field(default="", max_length=2000)
     parent_id: Optional[int] = None
     media_url: Optional[str] = None
     media_type: Optional[str] = None
 
 class ReactionRequest(BaseModel):
-    user_id: int
-    reaction_type: str # "LIKE" hoặc "DISLIKE"
+    reaction_type: Literal["LIKE", "DISLIKE", "NONE"]
 class CommentEditRequest(BaseModel):
-    user_id: int
-    content: str
+    content: str = Field(min_length=1, max_length=2000)
 
 def get_vietnam_time():
     vn_tz = timezone(timedelta(hours=7))
     return datetime.now(vn_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+def _post_owner(cursor, post_id: int) -> int:
+    row = cursor.execute("SELECT user_id FROM posts WHERE id=?", (post_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Bài viết không tồn tại")
+    return row[0]
+
+def _notify_post_owner(cursor, post_id: int, actor_id: int, kind: str, message: str):
+    owner_id = _post_owner(cursor, post_id)
+    if owner_id != actor_id:
+        cursor.execute(
+            "INSERT INTO notifications(user_id,actor_id,type,message,reference_id) VALUES(?,?,?,?,?)",
+            (owner_id, actor_id, kind, message, post_id),
+        )
 # --- Helper nhận diện Media ---
 def detect_media_type(file_url_or_path: str) -> str:
     _, ext = os.path.splitext(file_url_or_path.lower())
@@ -71,17 +84,32 @@ def detect_media_type_by_mime(file_url: str) -> str:
 
 # --- 1. API Upload Media ---
 @router.post("/upload")
-async def upload_media(file: UploadFile = File(...)):
+async def upload_media(file: UploadFile = File(...), user_id: int = Depends(get_current_user_id)):
+    allowed = {"image/jpeg": ("JPEG", ".jpg"), "image/png": ("PNG", ".png"), "image/webp": ("WEBP", ".webp")}
+    expected = allowed.get((file.content_type or "").lower())
+    if expected is None:
+        raise HTTPException(status_code=415, detail="Media phải là ảnh JPEG, PNG hoặc WebP")
+    contents = await file.read(8 * 1024 * 1024 + 1)
+    await file.close()
+    if len(contents) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Media không được vượt quá 8 MiB")
     try:
-        contents = await file.read()
-        media_url = upload_file_to_cloud(
-            file_bytes=contents,
-            filename=file.filename,
-            content_type=file.content_type
-        )
-        return {"status": "success", "media_url": media_url}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi upload: {str(e)}")
+        with Image.open(BytesIO(contents)) as image:
+            image.verify()
+            if (image.format or "").upper() != expected[0]:
+                raise HTTPException(status_code=415, detail="Nội dung ảnh không khớp định dạng đã khai báo")
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError):
+        raise HTTPException(status_code=415, detail="Nội dung tệp không phải ảnh hợp lệ")
+    upload_root = Path(os.getenv("UPLOAD_DIR", "uploads")).expanduser().resolve()
+    media_directory = (upload_root / "posts").resolve()
+    if not media_directory.is_relative_to(upload_root):
+        raise HTTPException(status_code=500, detail="Cấu hình thư mục upload không hợp lệ")
+    media_directory.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid4().hex}{expected[1]}"
+    (media_directory / filename).write_bytes(contents)
+    return {"status": "success", "media_url": f"/uploads/posts/{filename}"}
 
 def _get_post_details(cursor, post_id: int, post_type: str, current_user_id: int = 1):
     details = {}
@@ -164,7 +192,7 @@ def _get_post_details(cursor, post_id: int, post_type: str, current_user_id: int
 
 # --- 3. API Newsfeed ---
 @router.get("/feed")
-def get_main_feed(post_type: str = "ALL", current_user_id: int = Query(default=1)):
+def get_main_feed(post_type: str = "ALL", current_user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -180,14 +208,21 @@ def get_main_feed(post_type: str = "ALL", current_user_id: int = Query(default=1
             FROM posts p
             JOIN users u ON p.user_id = u.id
             LEFT JOIN posts orig_p ON p.original_post_id = orig_p.id
+            WHERE (
+                p.privacy = 'PUBLIC' OR p.user_id = ? OR
+                (p.privacy = 'FRIENDS' AND EXISTS (
+                    SELECT 1 FROM friendships f WHERE f.status='ACCEPTED' AND
+                    ((f.user_id=? AND f.friend_id=p.user_id) OR (f.friend_id=? AND f.user_id=p.user_id))
+                ))
+            )
         """
-        params = [current_user_id]
+        params = [current_user_id, current_user_id, current_user_id, current_user_id]
 
         if post_type and post_type.upper() != "ALL":
             if post_type.upper() == "REGULAR":
-                query += " WHERE p.post_type = 'REGULAR' OR (p.post_type = 'SHARED' AND orig_p.post_type = 'REGULAR')"
+                query += " AND (p.post_type = 'REGULAR' OR (p.post_type = 'SHARED' AND orig_p.post_type = 'REGULAR'))"
             elif post_type.upper() == "RECIPE":
-                query += " WHERE p.post_type = 'RECIPE' OR (p.post_type = 'SHARED' AND orig_p.post_type = 'RECIPE')"
+                query += " AND (p.post_type = 'RECIPE' OR (p.post_type = 'SHARED' AND orig_p.post_type = 'RECIPE'))"
 
         query += " ORDER BY p.created_at DESC"
         cursor.execute(query, params)
@@ -254,10 +289,11 @@ def get_main_feed(post_type: str = "ALL", current_user_id: int = Query(default=1
 
 # --- 4. API Thả tim Bài viết Tổng ---
 @router.post("/{post_id}/like")
-def toggle_like(post_id: int, user_id: int = Query(1)):
+def toggle_like(post_id: int, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
+        _post_owner(cursor, post_id)
         cursor.execute("SELECT 1 FROM likes WHERE user_id = ? AND post_id = ?", (user_id, post_id))
         liked = cursor.fetchone()
 
@@ -269,6 +305,7 @@ def toggle_like(post_id: int, user_id: int = Query(1)):
             cursor.execute("INSERT INTO likes (user_id, post_id) VALUES (?, ?)", (user_id, post_id))
             cursor.execute("UPDATE posts SET like_count = like_count + 1 WHERE id = ?", (post_id,))
             message = "Đã thả tim"
+            _notify_post_owner(cursor, post_id, user_id, "POST_LIKE", "Có người thích bài viết của bạn")
 
         conn.commit()
         return {"status": "success", "message": message}
@@ -280,7 +317,7 @@ def toggle_like(post_id: int, user_id: int = Query(1)):
 
 # --- 5. Thả tim / Bỏ tim RIÊNG cho từng Media ---
 @router.post("/media/{media_id}/like")
-def toggle_media_like(media_id: int, user_id: int = Query(1)):
+def toggle_media_like(media_id: int, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -324,27 +361,29 @@ def toggle_media_like(media_id: int, user_id: int = Query(1)):
 
 # --- 6. Share APIs ---
 @router.post("/{post_id}/share")
-def share_post_legacy(post_id: int, user_id: int = Query(1), share_type: str = Query("FEED"), caption: str = Query("")):
+def share_post_legacy(post_id: int, share_type: str = Query("FEED"), caption: str = Query(""), user_id: int = Depends(get_current_user_id)):
     if share_type == "FEED":
-        payload = ShareToFeedRequest(user_id=user_id, caption=caption)
-        return share_post_to_feed(post_id, payload)
+        payload = ShareToFeedRequest(caption=caption)
+        return share_post_to_feed(post_id, payload, user_id)
     else:
-        payload = ShareToMessageRequest(sender_id=user_id, receiver_ids=[2], message_text=caption)
-        return share_post_to_message(post_id, payload)
+        payload = ShareToMessageRequest(receiver_ids=[2], message_text=caption)
+        return share_post_to_message(post_id, payload, user_id)
 
 @router.post("/{post_id}/share-to-feed")
-def share_post_to_feed(post_id: int, payload: ShareToFeedRequest):
+def share_post_to_feed(post_id: int, payload: ShareToFeedRequest, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
+        _post_owner(cursor, post_id)
         current_time = get_vietnam_time()
         cursor.execute("""
             INSERT INTO posts (user_id, post_type, caption, privacy, original_post_id, created_at) 
             VALUES (?, 'SHARED', ?, ?, ?, ?)
-        """, (payload.user_id, payload.caption, payload.privacy, post_id, current_time))
+        """, (user_id, payload.caption, payload.privacy, post_id, current_time))
         
         new_post_id = cursor.lastrowid
         cursor.execute("UPDATE posts SET share_count = share_count + 1 WHERE id = ?", (post_id,))
+        _notify_post_owner(cursor, post_id, user_id, "POST_SHARE", "Có người chia sẻ bài viết của bạn")
         conn.commit()
         return {"status": "success", "message": "Đã chia sẻ lên Trang cá nhân!", "new_post_id": new_post_id}
     except Exception as e:
@@ -354,14 +393,16 @@ def share_post_to_feed(post_id: int, payload: ShareToFeedRequest):
         conn.close()
 
 @router.post("/{post_id}/share-to-message")
-def share_post_to_message(post_id: int, payload: ShareToMessageRequest):
+def share_post_to_message(post_id: int, payload: ShareToMessageRequest, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
+        _post_owner(cursor, post_id)
         for receiver_id in payload.receiver_ids:
             cursor.execute("INSERT INTO messages (sender_id, receiver_id, message_text, shared_post_id) VALUES (?, ?, ?, ?)",
-                           (payload.sender_id, receiver_id, payload.message_text, post_id))
+                           (user_id, receiver_id, payload.message_text, post_id))
         cursor.execute("UPDATE posts SET share_count = share_count + ? WHERE id = ?", (len(payload.receiver_ids), post_id))
+        _notify_post_owner(cursor, post_id, user_id, "POST_SHARE", "Có người chia sẻ bài viết của bạn")
         conn.commit()
         return {"status": "success", "message": f"Đã gửi bài viết cho {len(payload.receiver_ids)} người bạn!"}
     except Exception as e:
@@ -371,7 +412,7 @@ def share_post_to_message(post_id: int, payload: ShareToMessageRequest):
         conn.close()
 # 7. API Lấy danh sách bình luận (Đã cấu trúc đệ quy/phân tầng)
 @router.get("/{post_id}/comments")
-def get_post_comments(post_id: int, current_user_id: int = Query(1)):
+def get_post_comments(post_id: int, current_user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -430,17 +471,27 @@ def get_post_comments(post_id: int, current_user_id: int = Query(1)):
 
 # 8. API Thêm bình luận mới (Gốc hoặc Trả lời của Header bài viết)
 @router.post("/{post_id}/comments")
-def add_comment(post_id: int, req: CommentCreateRequest):
+def add_comment(post_id: int, req: CommentCreateRequest, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
+        _post_owner(cursor, post_id)
         if not req.content and not req.media_url:
             raise HTTPException(status_code=400, detail="Bình luận phải có chữ hoặc ảnh đính kèm")
+
+        parent_owner = None
+        if req.parent_id is not None:
+            parent = cursor.execute(
+                "SELECT user_id FROM comments WHERE id=? AND post_id=?", (req.parent_id, post_id)
+            ).fetchone()
+            if parent is None:
+                raise HTTPException(status_code=404, detail="Không tìm thấy bình luận cha trong bài viết")
+            parent_owner = parent[0]
 
         cursor.execute("""
             INSERT INTO comments (post_id, user_id, parent_id, content, media_url, media_type, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (post_id, req.user_id, req.parent_id, req.content, req.media_url, req.media_type, get_vietnam_time()))
+        """, (post_id, user_id, req.parent_id, req.content, req.media_url, req.media_type, get_vietnam_time()))
         
         # 1. CHỈ ĐẾM LẠI COMMENT THUỘC HEADER (LOẠI BỎ COMMENT CỦA MEDIA)
         cursor.execute("SELECT COUNT(*) FROM comments WHERE post_id = ? AND (media_id IS NULL OR media_id = 0)", (post_id,))
@@ -448,6 +499,12 @@ def add_comment(post_id: int, req: CommentCreateRequest):
 
         # 2. Cập nhật lại cột comment_count chuẩn (chỉ đếm header) trong bảng posts
         cursor.execute("UPDATE posts SET comment_count = ? WHERE id = ?", (real_count, post_id))
+        _notify_post_owner(cursor, post_id, user_id, "POST_COMMENT", "Có người bình luận bài viết của bạn")
+        if parent_owner is not None and parent_owner != user_id:
+            cursor.execute(
+                "INSERT INTO notifications(user_id,actor_id,type,message,reference_id) VALUES(?,?,?,?,?)",
+                (parent_owner, user_id, "COMMENT_REPLY", "Có người trả lời bình luận của bạn", post_id),
+            )
         conn.commit()
 
         return {
@@ -460,20 +517,26 @@ def add_comment(post_id: int, req: CommentCreateRequest):
 
 # 9. API Thả Like / Dislike bình luận
 @router.post("/comments/{comment_id}/react")
-def react_comment(comment_id: int, req: ReactionRequest):
+def react_comment(comment_id: int, req: ReactionRequest, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
+        exists = cursor.execute(
+            "SELECT 1 FROM comments WHERE id=? UNION ALL SELECT 1 FROM post_media_comments WHERE id=? LIMIT 1",
+            (comment_id, comment_id),
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Không tìm thấy bình luận")
         # 1. Thêm / Cập nhật / Xóa reaction của user trong bảng comment_reactions
         if req.reaction_type == "NONE":
             cursor.execute("DELETE FROM comment_reactions WHERE user_id = ? AND comment_id = ?", 
-                           (req.user_id, comment_id))
+                           (user_id, comment_id))
         else:
             cursor.execute("""
                 INSERT INTO comment_reactions (user_id, comment_id, reaction_type)
                 VALUES (?, ?, ?)
                 ON CONFLICT(user_id, comment_id) DO UPDATE SET reaction_type = excluded.reaction_type
-            """, (req.user_id, comment_id, req.reaction_type))
+            """, (user_id, comment_id, req.reaction_type))
 
         # 2. Đếm số lượng LIKE và DISLIKE mới nhất của comment này
         cursor.execute("SELECT COUNT(*) FROM comment_reactions WHERE comment_id = ? AND reaction_type = 'LIKE'", (comment_id,))
@@ -512,7 +575,7 @@ def react_comment(comment_id: int, req: ReactionRequest):
         conn.close()
 # --- 10. API Lấy danh sách bình luận RIÊNG cho từng Media ---
 @router.get("/media/{media_id}/comments")
-def get_media_comments(media_id: int, current_user_id: int = Query(1)):
+def get_media_comments(media_id: int, current_user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -569,7 +632,7 @@ def get_media_comments(media_id: int, current_user_id: int = Query(1)):
 
 # --- 11. API Thêm bình luận RIÊNG cho từng Media ---
 @router.post("/media/{media_id}/comments")
-def add_media_comment(media_id: int, req: CommentCreateRequest):
+def add_media_comment(media_id: int, req: CommentCreateRequest, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -583,7 +646,7 @@ def add_media_comment(media_id: int, req: CommentCreateRequest):
         cursor.execute("""
             INSERT INTO comments (post_id, media_id, user_id, parent_id, content, media_url, media_type, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (post_id, media_id, req.user_id, req.parent_id, req.content, req.media_url, req.media_type, get_vietnam_time()))
+        """, (post_id, media_id, user_id, req.parent_id, req.content, req.media_url, req.media_type, get_vietnam_time()))
         
         # Cập nhật số lượng comment trong post_media
         cursor.execute("SELECT COUNT(*) FROM comments WHERE media_id = ?", (media_id,))
@@ -601,16 +664,18 @@ def add_media_comment(media_id: int, req: CommentCreateRequest):
      
 # --12. API Xóa bình luận--        
 @router.delete("/comments/{comment_id}")
-def delete_comment(comment_id: int, user_id: int = Query(default=1)):
+def delete_comment(comment_id: int, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
         # 1. Kiểm tra xem comment_id nằm trong bảng `comments` (Bài post Header hoặc Media)
-        cursor.execute("SELECT post_id, media_id FROM comments WHERE id = ?", (comment_id,))
+        cursor.execute("SELECT post_id, media_id, user_id FROM comments WHERE id = ?", (comment_id,))
         row_post = cursor.fetchone()
 
         if row_post:
-            post_id, media_id = row_post
+            post_id, media_id, owner_id = row_post
+            if owner_id != user_id:
+                raise HTTPException(status_code=403, detail="Bạn không có quyền xóa bình luận này")
             # Xóa comment chính + comment phản hồi (replies)
             cursor.execute("DELETE FROM comments WHERE id = ? OR parent_id = ?", (comment_id, comment_id))
             
@@ -670,11 +735,13 @@ def delete_comment(comment_id: int, user_id: int = Query(default=1)):
         conn.close()
 #--13.API Chỉnh sửa nội dung bình luận--
 @router.put("/comments/{comment_id}")
-def edit_comment(comment_id: int, req: CommentEditRequest):
+def edit_comment(comment_id: int, req: CommentEditRequest, user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
-        # Thử UPDATE ở bảng `comments` trước
+        owner = cursor.execute("SELECT user_id FROM comments WHERE id=?", (comment_id,)).fetchone()
+        if owner is None or owner[0] != user_id:
+            raise HTTPException(status_code=403, detail="Bạn không có quyền sửa bình luận này")
         cursor.execute("UPDATE comments SET content = ? WHERE id = ?", (req.content, comment_id))
         
         # Nếu không có dòng nào được update (do id thuộc comment media), update tiếp bảng `post_media_comments`
@@ -687,7 +754,7 @@ def edit_comment(comment_id: int, req: CommentEditRequest):
         conn.close()
 # --- API Lấy chi tiết bài viết (Khi đã có prefix /api/posts trong main.py) ---
 @router.get("/{post_id}")
-def get_post_detail_endpoint(post_id: int, current_user_id: int = Query(default=1)):
+def get_post_detail_endpoint(post_id: int, current_user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -709,6 +776,12 @@ def get_post_detail_endpoint(post_id: int, current_user_id: int = Query(default=
             raise HTTPException(status_code=404, detail="Bài viết không tồn tại")
         
         p_id, p_type, caption, like_count, comment_count, share_count, created_at, privacy, u_id, u_name, u_avatar, is_liked = row
+        if privacy == "ONLY_ME" and u_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Bạn không có quyền xem bài viết này")
+        if privacy == "FRIENDS" and u_id != current_user_id:
+            friend = cursor.execute("SELECT 1 FROM friendships WHERE status='ACCEPTED' AND ((user_id=? AND friend_id=?) OR (user_id=? AND friend_id=?))", (current_user_id, u_id, u_id, current_user_id)).fetchone()
+            if friend is None:
+                raise HTTPException(status_code=403, detail="Bài viết chỉ dành cho bạn bè")
         
         post_data = {
             "post_id": p_id,
@@ -731,6 +804,8 @@ def get_post_detail_endpoint(post_id: int, current_user_id: int = Query(default=
         post_data.update(details)
 
         return {"status": "success", "post": post_data}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi lấy chi tiết bài viết: {str(e)}")
     finally:
@@ -738,7 +813,7 @@ def get_post_detail_endpoint(post_id: int, current_user_id: int = Query(default=
 
 # API Lấy danh sách bạn bè đã kết bạn (status = 'ACCEPTED')
 @router.get("/users/{user_id}/friends")
-def get_user_friends(user_id: int):
+def get_user_friends(user_id: int, current_user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -759,7 +834,7 @@ def get_user_friends(user_id: int):
         conn.close()
 # Thêm endpoint này vào file router chứa các API /api/posts
 @router.get("/users/{user_id}")
-def get_user_profile(user_id: int):
+def get_user_profile(user_id: int, current_user_id: int = Depends(get_current_user_id)):
     conn = get_db()
     cursor = conn.cursor()
     try:
@@ -772,14 +847,13 @@ def get_user_profile(user_id: int):
             "full_name": row[1],
             "avatar_url": row[2]
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Không thể tải hồ sơ người dùng")
     finally:
         conn.close()
 #Thuật toán học bài viết theo sơở thích của người dùng (Dựa vào số lượt like, comment, share, thời gian đăng bài) sẽ được triển khai trong các phiên bản sau.
 #Sự khác biệt giữa Quyền xem (privacy) và thuật toàn phân phối (Feed Algorithm) sẽ được triển khai trong các phiên bản sau.
 # Khi share bài viết cho bạn bè cần kiểm tra người đó có phải bạn bè hay không
-# Chưa làm khi có nguười comment bài viết do mình tạo thì sẽ gửi thông báo cho người tạo
-# Chưa làm khi có người trả lời comment của mình thì mình sẽ được gửi thông báo.
-# Chưa làm khi có người like, share bài viết do mình tạo thì sẽ gửi thông báo cho người tạo 
 

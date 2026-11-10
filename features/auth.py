@@ -444,6 +444,11 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class ChangeEmailRequest(BaseModel):
+    current_password: str
+    new_email: str
+
+
 def _require_secret() -> str:
     secret = os.getenv("JWT_SECRET_KEY")
     if not secret:
@@ -725,6 +730,28 @@ def change_password(
         )
         conn.commit()
         return {"message": "Đổi mật khẩu thành công"}
+    finally:
+        conn.close()
+
+
+@router.post("/change-email")
+def change_email(
+    data: ChangeEmailRequest,
+    current_user_id: int = Depends(get_current_user_id),
+):
+    new_email = data.new_email.strip().lower()
+    if not EMAIL_RE.fullmatch(new_email):
+        raise _bad_request("Email mới không hợp lệ")
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT password_hash FROM users WHERE id=?", (current_user_id,)).fetchone()
+        if row is None or not row["password_hash"] or not verify_password(data.current_password, row["password_hash"]):
+            raise _bad_request("Mật khẩu hiện tại không đúng")
+        if conn.execute("SELECT 1 FROM users WHERE email=? AND id<>?", (new_email, current_user_id)).fetchone():
+            raise HTTPException(status.HTTP_409_CONFLICT, "Email đã được sử dụng")
+        conn.execute("UPDATE users SET email=? WHERE id=?", (new_email, current_user_id))
+        conn.commit()
+        return {"status": "success", "message": "Đổi email thành công"}
     finally:
         conn.close()
 

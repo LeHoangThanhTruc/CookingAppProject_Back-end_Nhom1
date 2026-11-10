@@ -8,7 +8,9 @@ DB_NAME = "database.db"
 def get_db():
     database_path = os.getenv("DATABASE_PATH", DB_NAME)
     if database_path != ":memory:":
-        Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+        resolved_path = Path(database_path).expanduser().resolve()
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        database_path = str(resolved_path)
 
     conn = sqlite3.connect(database_path)
     conn.row_factory = sqlite3.Row
@@ -216,6 +218,76 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_comments_media_id ON comments(media_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_media_likes_media_id ON post_media_likes(media_id);")
+
+    cursor.executescript('''
+        CREATE TABLE IF NOT EXISTS favorites (
+            user_id INTEGER NOT NULL,
+            recipe_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, recipe_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(post_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS saved_recipes (
+            user_id INTEGER NOT NULL,
+            recipe_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, recipe_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(post_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS recipe_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipe_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+            content TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (recipe_id, user_id),
+            FOREIGN KEY (recipe_id) REFERENCES recipes(post_id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS recipe_review_media (
+            review_id INTEGER PRIMARY KEY,
+            media_url TEXT NOT NULL,
+            media_type TEXT NOT NULL DEFAULT 'IMAGE',
+            FOREIGN KEY (review_id) REFERENCES recipe_reviews(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS cooking_schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            recipe_id INTEGER NOT NULL,
+            scheduled_for TEXT NOT NULL,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(post_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS follows (
+            follower_id INTEGER NOT NULL,
+            following_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (follower_id, following_id),
+            CHECK (follower_id <> following_id),
+            FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            actor_id INTEGER,
+            type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            reference_id INTEGER,
+            is_read INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages(sender_id, receiver_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+    ''')
 
     conn.commit()
     conn.close()

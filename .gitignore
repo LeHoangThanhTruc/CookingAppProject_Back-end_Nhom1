@@ -208,6 +208,8 @@ tempCodeRunnerFile.py
 # Runtime configuration and user uploads
 /uploads/
 *.db-journal
+database.db
+*.db
 
 # Ruff stuff:
 .ruff_cache/

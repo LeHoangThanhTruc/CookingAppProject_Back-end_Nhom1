@@ -8,7 +8,12 @@ from fastapi.staticfiles import StaticFiles
 from database import init_db
 
 # Import các APIRouter từ thư mục features
-from features import auth, main_screen, user_profile
+from features import auth, main_screen, recipes, social, user_profile
+
+load_dotenv()
+secret = os.getenv("JWT_SECRET_KEY", "").strip()
+if not secret or secret == "replace-with-a-long-random-secret" or len(secret) < 32:
+    raise RuntimeError("JWT_SECRET_KEY phải được cấu hình bằng chuỗi bí mật dài ít nhất 32 ký tự")
 
 app = FastAPI(
     title="Cooking App API",
@@ -36,6 +41,11 @@ app.mount("/uploads", StaticFiles(directory=str(upload_directory)), name="upload
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(main_screen.router, prefix="/api/posts", tags=["Main Screen Feed"])
 app.include_router(user_profile.router, prefix="/api/profile", tags=["User Profile"])
+app.include_router(recipes.router, prefix="/api/recipes", tags=["Recipes"])
+app.include_router(recipes.schedule_router, prefix="/api/schedules", tags=["Cooking Schedule"])
+app.include_router(social.router, prefix="/api/social", tags=["Social"])
+app.include_router(social.message_router, prefix="/api/messages", tags=["Messages"])
+app.include_router(social.notification_router, prefix="/api/notifications", tags=["Notifications"])
 
 @app.get("/", tags=["Root"])
 def root():
@@ -43,3 +53,17 @@ def root():
         "status": "success",
         "message": "Backend Cooking App API đang chạy bình thường"
     }
+
+@app.get("/health", tags=["Health"])
+def health():
+    from database import get_db
+
+    connection = get_db()
+    try:
+        connection.execute("SELECT 1").fetchone()
+    finally:
+        connection.close()
+    probe = upload_directory / ".healthcheck"
+    probe.write_text("ok", encoding="utf-8")
+    probe.unlink(missing_ok=True)
+    return {"status": "ok", "database": "ok", "uploads": "ok"}

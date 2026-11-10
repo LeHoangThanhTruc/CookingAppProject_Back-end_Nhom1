@@ -739,3 +739,28 @@ def test_register_rejects_phone_like_username_and_case_insensitive_duplicate(cli
     assert phone_like.status_code == 400
     assert first.status_code == 201
     assert duplicate.status_code == 409
+def test_authenticated_user_can_change_email_with_password_confirmation(client):
+    assert client.post("/api/auth/register", json=register_payload()).status_code == 201
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "newchef@example.com", "password": "matkhau123"},
+    )
+    token = login.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    wrong = client.post(
+        "/api/auth/change-email",
+        headers=headers,
+        json={"current_password": "SaiPassword", "new_email": "changed@example.com"},
+    )
+    assert wrong.status_code == 400
+    changed = client.post(
+        "/api/auth/change-email",
+        headers=headers,
+        json={"current_password": "matkhau123", "new_email": "changed@example.com"},
+    )
+    assert changed.status_code == 200
+    assert client.post(
+        "/api/auth/login",
+        json={"email": "changed@example.com", "password": "matkhau123"},
+    ).status_code == 200
+

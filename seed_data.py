@@ -1,15 +1,26 @@
-import sqlite3
-from database import init_db, DB_NAME  # Import init_db và tên DB chuẩn từ database.py
+import sys
+
+from database import get_db, init_db
+from features.auth import hash_password
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 def seed_database():
     # 1. Tự động tạo lại cấu trúc bảng mới nhất nếu chưa có
     init_db()
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     cursor = conn.cursor()
 
     print("Đang dọn dẹp dữ liệu cũ...")
     cursor.execute("DELETE FROM friendships;")  # Dọn dẹp bảng bạn bè
+    cursor.execute("DELETE FROM notifications;")
+    cursor.execute("DELETE FROM follows;")
+    cursor.execute("DELETE FROM cooking_schedules;")
+    cursor.execute("DELETE FROM recipe_reviews;")
+    cursor.execute("DELETE FROM favorites;")
+    cursor.execute("DELETE FROM saved_recipes;")
     cursor.execute("DELETE FROM messages;")                      
     cursor.execute("DELETE FROM likes;")
     cursor.execute("DELETE FROM comments;")
@@ -20,17 +31,17 @@ def seed_database():
     cursor.execute("DELETE FROM posts;")
     cursor.execute("DELETE FROM users;")
 
-    print("1. Đang thêm 5 Users...")
+    print("1. Đang thêm 4 tài khoản demo...")
+    demo_password = hash_password("Demo12345")
     users = [
-        (1, 'chef_albert', 'albert@gmail.com', 'Chef Albert', 'https://picsum.photos/id/64/200/200'),
-        (2, 'gordon_ramsay', 'gordon@gmail.com', 'Gordon Ramsay', 'https://picsum.photos/id/1025/200/200'),
-        (3, 'hoa_bep_viet', 'hoabep@gmail.com', 'Hoa Bếp Việt', 'https://picsum.photos/id/1062/200/200'),
-        (4, 'lan_eating', 'lan@gmail.com', 'Lan Foodie', 'https://picsum.photos/id/338/200/200'),
-        (5, 'minh_masterchef', 'minh@gmail.com', 'Minh MasterChef', 'https://picsum.photos/id/1012/200/200'),
+        (1, 'chef_albert', 'albert@example.com', 'Chef Albert', 'https://picsum.photos/id/64/200/200', demo_password),
+        (2, 'gordon_ramsay', 'gordon@example.com', 'Gordon Ramsay', 'https://picsum.photos/id/1025/200/200', demo_password),
+        (3, 'hoa_bep_viet', 'hoa@example.com', 'Hoa Bếp Việt', 'https://picsum.photos/id/1062/200/200', demo_password),
+        (4, 'lan_eating', 'lan@example.com', 'Lan Foodie', 'https://picsum.photos/id/338/200/200', demo_password),
     ]
     cursor.executemany("""
-        INSERT INTO users (id, username, email, full_name, avatar_url)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO users (id, username, email, full_name, avatar_url, password_hash)
+        VALUES (?, ?, ?, ?, ?, ?)
     """, users)
 
     print("2. Đang thêm Bạn bè (Friendships) cho User 1...")
@@ -38,8 +49,7 @@ def seed_database():
     friendships = [
         (1, 2, 'ACCEPTED'),  # User 1 là bạn của Gordon Ramsay (User 2)
         (1, 3, 'ACCEPTED'),  # User 1 là bạn của Hoa Bếp Việt (User 3)
-        (1, 4, 'ACCEPTED'),  # User 1 là bạn của Lan Foodie (User 4)
-        (1, 5, 'ACCEPTED')   # User 1 là bạn của Minh MasterChef (User 5)
+        (1, 4, 'ACCEPTED')   # User 1 là bạn của Lan Foodie (User 4)
     ]
     cursor.executemany("""
         INSERT INTO friendships (user_id, friend_id, status)
@@ -64,7 +74,7 @@ def seed_database():
     # Bài 3: REGULAR - Nhiều ảnh - ONLY_ME (Chỉ mình tôi)
     cursor.execute("""
         INSERT INTO posts (id, user_id, post_type, caption, privacy, like_count, comment_count, share_count, created_at) 
-        VALUES (3, 5, 'REGULAR', 'Nhật ký chuẩn bị nguyên liệu cho nhà hàng cuối tuần!', 'ONLY_ME', 5, 0, 0, '2026-10-30 19:00:00');
+        VALUES (3, 4, 'REGULAR', 'Nhật ký chuẩn bị nguyên liệu cho nhà hàng cuối tuần!', 'ONLY_ME', 5, 0, 0, '2026-10-30 19:00:00');
     """)
     cursor.executemany("INSERT INTO post_media (post_id, media_url, media_type) VALUES (?, ?, ?)", [
         (3, 'https://picsum.photos/id/292/600/400', 'IMAGE'),
@@ -151,9 +161,21 @@ def seed_database():
         (3, 4), # User 3 like bài 4
         (4, 2), # User 4 like bài 2
         (2, 5), # Gordon Ramsay like bài 5
-        (5, 6)  # Minh MasterChef like bài 6
+        (4, 6)  # Lan Foodie like bài 6
     ]
     cursor.executemany("INSERT INTO likes (user_id, post_id) VALUES (?, ?)", likes)
+
+    print("8. Đang thêm yêu thích, công thức đã lưu và lịch nấu mẫu...")
+    cursor.executemany("INSERT INTO favorites (user_id, recipe_id) VALUES (?, ?)", [(1, 4), (1, 5)])
+    cursor.executemany("INSERT INTO saved_recipes (user_id, recipe_id) VALUES (?, ?)", [(1, 4), (1, 5)])
+    cursor.execute(
+        "INSERT INTO cooking_schedules (user_id, recipe_id, scheduled_for, note) VALUES (?, ?, ?, ?)",
+        (1, 4, "2026-11-11T18:00:00", "Bữa tối demo"),
+    )
+    cursor.execute(
+        "INSERT INTO recipe_reviews (recipe_id, user_id, rating, content) VALUES (?, ?, ?, ?)",
+        (4, 1, 5, "Công thức dễ làm và rất ngon"),
+    )
 
     conn.commit()
     conn.close()
