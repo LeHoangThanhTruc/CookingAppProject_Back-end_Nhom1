@@ -282,11 +282,16 @@ def get_user_profile(user_id: int, current_user_id: int = Depends(get_current_us
         ).fetchone()
         followers = connection.execute("SELECT COUNT(*) AS total FROM follows WHERE following_id=?", (user_id,)).fetchone()["total"]
         following = connection.execute("SELECT COUNT(*) AS total FROM follows WHERE follower_id=?", (user_id,)).fetchone()["total"]
+        is_following = connection.execute(
+            "SELECT 1 FROM follows WHERE follower_id=? AND following_id=?",
+            (current_user_id, user_id),
+        ).fetchone() is not None
         posts = connection.execute("SELECT COUNT(*) AS total FROM posts WHERE user_id=? AND privacy='PUBLIC'", (user_id,)).fetchone()["total"]
         return {
             "id": row["id"], "username": row["username"], "full_name": row["full_name"],
             "bio": row["bio"], "avatar_url": row["avatar_url"], "friend_status": friend["status"] if friend else None,
             "followers_count": followers, "following_count": following, "posts_count": posts,
+            "is_following": is_following,
         }
     finally:
         connection.close()
