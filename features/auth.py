@@ -46,8 +46,14 @@ class RegisterRequest(BaseModel):
     phone_number: Optional[str] = None
 
 class LoginRequest(BaseModel):
-    email: str  # Nhận cả email lẫn username
+    # identifier là trường mới, nhận username/email/số điện thoại
+    # email giữ lại để tương thích với phiên bản Android cũ
+    identifier: Optional[str] = None
+    email: Optional[str] = None
     password: str
+
+    def get_identifier(self) -> str:
+        return (self.identifier or self.email or "").strip()
 
 class OAuthLoginRequest(BaseModel):
     provider: str  # GOOGLE hoặc FACEBOOK
@@ -190,52 +196,118 @@ def register(data: RegisterRequest):
         conn.close()
 
 
-def _find_user_for_login(conn: sqlite3.Connection, identifier: str) -> Optional[sqlite3.Row]:
-    """Tìm tài khoản theo email, tên tài khoản (không phân biệt hoa thường) hoặc số điện thoại."""
-    identifier = identifier.strip()
+def _find_user_for_login(
+    conn: sqlite3.Connection,
+    identifier: str
+) -> Optional[sqlite3.Row]:
+    """
+    Tìm tài khoản bằng:
+    - Email
+    - Username (không phân biệt hoa thường)
+    - Số điện thoại (hỗ trợ +84, 84 và số 0)
+    """
+
+    identifier = (identifier or "").strip()
+
     if not identifier:
         return None
+
+    # 1. Đăng nhập bằng email
     if "@" in identifier:
         return conn.execute(
-            "SELECT * FROM users WHERE email = ?", (identifier.lower(),)
+            """
+            SELECT *
+            FROM users
+            WHERE lower(email) = lower(?)
+            LIMIT 1
+            """,
+            (identifier,)
         ).fetchone()
 
+    # 2. Đăng nhập bằng username
     row = conn.execute(
-        "SELECT * FROM users WHERE lower(username) = ?", (identifier.lower(),)
+        """
+        SELECT *
+        FROM users
+        WHERE lower(username) = lower(?)
+        LIMIT 1
+        """,
+        (identifier,)
     ).fetchone()
+
     if row is not None:
         return row
 
-    cleaned = re.sub(r"[\s.\-()]", "", identifier)
-    if PHONE_RE.match(cleaned):
-        wanted = _normalize_phone(cleaned)
-        rows = conn.execute("SELECT * FROM users WHERE phone_number IS NOT NULL").fetchall()
-        matches = [item for item in rows if _normalize_phone(item["phone_number"]) == wanted]
-        if len(matches) == 1:  # số điện thoại dùng chung cho nhiều tài khoản thì không đăng nhập bằng số được
+    # 3. Đăng nhập bằng số điện thoại
+    cleaned_phone = re.sub(r"[\s.\-()]", "", identifier)
+
+    if PHONE_RE.fullmatch(cleaned_phone):
+        wanted_phone = _normalize_phone(cleaned_phone)
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE phone_number IS NOT NULL
+            """
+        ).fetchall()
+
+        matches = [
+            user for user in rows
+            if _normalize_phone(user["phone_number"]) == wanted_phone
+        ]
+
+        # Chỉ đăng nhập nếu tìm được duy nhất một tài khoản
+        if len(matches) == 1:
             return matches[0]
+
     return None
 
 
 @router.post("/login")
 def login(data: LoginRequest):
-    identifier = data.email.strip()
+
+    identifier = data.get_identifier()
+
     invalid = HTTPException(
-        status.HTTP_401_UNAUTHORIZED, "Tài khoản hoặc mật khẩu không đúng"
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Tài khoản hoặc mật khẩu không đúng"
     )
 
+    if not identifier or not data.password:
+        raise invalid
+
     conn = get_db()
+
     try:
-        row = _find_user_for_login(conn, identifier)
+        user = _find_user_for_login(conn, identifier)
 
-        # Tài khoản đăng ký bằng Google/Facebook không có password_hash nên không đăng nhập bằng mật khẩu
-        if row is None or not row["password_hash"]:
-            raise invalid
-        if not verify_password(data.password, row["password_hash"]):
+        # Không cho đăng nhập bằng mật khẩu với tài khoản OAuth
+        if user is None or not user["password_hash"]:
             raise invalid
 
-        conn.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", (row["id"],))
+        # Kiểm tra mật khẩu
+        if not verify_password(
+            data.password,
+            user["password_hash"]
+        ):
+            raise invalid
+
+        # Cập nhật thời gian đăng nhập
+        conn.execute(
+            """
+            UPDATE users
+            SET last_login_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (user["id"],)
+        )
+
         conn.commit()
-        return _token_response(row)
+
+        # Trả JWT và thông tin người dùng
+        return _token_response(user)
+
     finally:
         conn.close()
 
